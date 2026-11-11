@@ -27,15 +27,22 @@ async function handleSync(req: NextRequest) {
   let signedInUserId: string | undefined = undefined;
 
   if (!isCronAuthed) {
-    const serverClient = createServerClient();
-    const { data: { user }, error } = await serverClient.auth.getUser();
-    if (error || !user) {
+    try {
+      const serverClient = createServerClient();
+      const { data: { user }, error } = await serverClient.auth.getUser();
+      if (error || !user) {
+        return NextResponse.json(
+          { error: 'Unauthorized: valid CRON_SECRET header (Authorization: Bearer <CRON_SECRET>) or active session required' },
+          { status: 401 }
+        );
+      }
+      signedInUserId = user.id;
+    } catch {
       return NextResponse.json(
         { error: 'Unauthorized: valid CRON_SECRET header (Authorization: Bearer <CRON_SECRET>) or active session required' },
         { status: 401 }
       );
     }
-    signedInUserId = user.id;
   }
 
   const requestedAccountId = req.nextUrl.searchParams.get('accountId') || undefined;
