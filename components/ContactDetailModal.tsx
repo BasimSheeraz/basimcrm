@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '@/lib/store';
 import { 
   X, 
@@ -10,12 +10,16 @@ import {
   Clock, 
   Send, 
   StickyNote, 
-  Plus
+  Plus,
+  Globe,
+  ExternalLink,
+  UserCheck
 } from 'lucide-react';
-import { PipelineStatus } from '@/types';
+import { PipelineStatus, Prospect } from '@/types';
+import { getProspectForContactOrEmailAction } from '@/lib/actions/prospects';
 
 interface ContactDetailModalProps {
-  onOpenComposeTo: (email: string, name: string, company: string) => void;
+  onOpenComposeTo: (email: string, name: string, company: string, prospectId?: string) => void;
 }
 
 export function ContactDetailModal({ onOpenComposeTo }: ContactDetailModalProps) {
@@ -33,22 +37,31 @@ export function ContactDetailModal({ onOpenComposeTo }: ContactDetailModalProps)
     setActiveView
   } = useApp();
 
-  const [activeTab, setActiveTab] = useState<'emails' | 'notes' | 'timeline'>('emails');
+  const [activeTab, setActiveTab] = useState<'emails' | 'notes' | 'timeline' | 'prospect'>('emails');
   const [newNoteContent, setNewNoteContent] = useState('');
   const [timelineEvents, setTimelineEvents] = useState<any[]>([]);
+  const [linkedProspect, setLinkedProspect] = useState<Prospect | null>(null);
 
-  React.useEffect(() => {
-    if (selectedContactId) {
+  const contact = contacts.find(c => c.id === selectedContactId);
+
+  useEffect(() => {
+    if (selectedContactId && contact) {
       import('@/lib/actions/contacts').then(({ getContactTimelineAction }) => {
         getContactTimelineAction(selectedContactId).then(setTimelineEvents).catch(() => {});
       });
+
+      getProspectForContactOrEmailAction({
+        contactId: selectedContactId,
+        email: contact.email,
+      })
+        .then((p) => setLinkedProspect(p))
+        .catch(() => setLinkedProspect(null));
+    } else {
+      setLinkedProspect(null);
     }
-  }, [selectedContactId]);
+  }, [selectedContactId, contact]);
 
-  if (!selectedContactId) return null;
-
-  const contact = contacts.find(c => c.id === selectedContactId);
-  if (!contact) return null;
+  if (!selectedContactId || !contact) return null;
 
   const contactMessages = messages
     .filter(m => m.contactId === contact.id || m.toEmail.toLowerCase() === contact.email.toLowerCase() || m.fromEmail.toLowerCase() === contact.email.toLowerCase())
@@ -134,12 +147,24 @@ export function ContactDetailModal({ onOpenComposeTo }: ContactDetailModalProps)
                 )}
               </div>
 
-              {/* Tags */}
+              {/* Tags & Quick Social Badges */}
               <div className="flex flex-wrap items-center gap-1.5 mt-2.5">
                 {contact.tags.map(tag => (
                   <span key={tag} className="px-2.5 py-0.5 rounded-full text-[10.5px] font-medium bg-white/[0.06] border border-white/10 text-white/70">
                     #{tag}
                   </span>
+                ))}
+                {linkedProspect?.socials && linkedProspect.socials.map(soc => (
+                  <a
+                    key={soc.id}
+                    href={soc.profileUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10.5px] font-mono bg-[#0A84FF]/15 border border-[#0A84FF]/30 text-[#0A84FF] hover:bg-[#0A84FF]/25 transition-colors"
+                  >
+                    <span>@{soc.handleNormalized}</span>
+                    <ExternalLink className="w-2.5 h-2.5" />
+                  </a>
                 ))}
               </div>
             </div>
@@ -149,7 +174,7 @@ export function ContactDetailModal({ onOpenComposeTo }: ContactDetailModalProps)
             <button
               onClick={() => {
                 setSelectedContactId(null);
-                onOpenComposeTo(contact.email, contact.name, contact.company);
+                onOpenComposeTo(contact.email, contact.name, contact.company, linkedProspect?.id);
               }}
               className="flex items-center space-x-2 apple-primary-btn px-4 py-2 rounded-xl text-xs font-semibold transition-all shadow-sm active:scale-95 cursor-pointer"
             >
@@ -202,6 +227,20 @@ export function ContactDetailModal({ onOpenComposeTo }: ContactDetailModalProps)
             <Clock className="w-4 h-4" />
             <span>Activity Timeline</span>
           </button>
+
+          {linkedProspect && (
+            <button
+              onClick={() => setActiveTab('prospect')}
+              className={`py-3 px-4 text-xs font-semibold border-b-2 flex items-center gap-2 transition-colors cursor-pointer ${
+                activeTab === 'prospect'
+                  ? 'border-[#0A84FF] text-[#0A84FF]'
+                  : 'border-transparent text-white/55 hover:text-white'
+              }`}
+            >
+              <Globe className="w-4 h-4" />
+              <span>Prospect Dossier ({linkedProspect.socials.length})</span>
+            </button>
+          )}
         </div>
 
         {/* Tab Body */}
@@ -335,7 +374,7 @@ export function ContactDetailModal({ onOpenComposeTo }: ContactDetailModalProps)
                 )}
               </div>
             </div>
-          ) : (
+          ) : activeTab === 'timeline' ? (
             <div className="space-y-3">
               <div className="text-xs text-white/50 mb-2">
                 Unified audit and communication trail for this contact:
@@ -368,6 +407,79 @@ export function ContactDetailModal({ onOpenComposeTo }: ContactDetailModalProps)
                 </div>
               )}
             </div>
+          ) : (
+            /* Prospect Dossier Tab */
+            linkedProspect && (
+              <div className="space-y-4">
+                <div className="p-5 rounded-2xl bg-white/[0.03] border border-white/10 space-y-4">
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <div className="text-base font-bold text-white/95">{linkedProspect.fullName}</div>
+                      <div className="text-xs text-white/60 mt-0.5">{linkedProspect.company || 'No company specified'}</div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs px-2.5 py-1 rounded-full bg-[#0A84FF]/15 border border-[#0A84FF]/25 text-[#0A84FF] font-medium">
+                        Status: {linkedProspect.status}
+                      </span>
+                      {linkedProspect.source && (
+                        <span className="text-xs px-2.5 py-1 rounded-full bg-white/[0.06] border border-white/10 text-white/70">
+                          Source: {linkedProspect.source}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Social Profiles */}
+                  <div>
+                    <h4 className="text-xs font-semibold text-white/50 uppercase tracking-wider mb-2">
+                      Connected Social Profiles
+                    </h4>
+                    {linkedProspect.socials.length === 0 ? (
+                      <div className="text-xs text-white/35 italic">No social profiles attached.</div>
+                    ) : (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {linkedProspect.socials.map(soc => (
+                          <a
+                            key={soc.id}
+                            href={soc.profileUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex items-center justify-between p-3 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 text-xs text-white/85 transition-colors"
+                          >
+                            <div>
+                              <span className="text-[10px] uppercase font-bold text-white/40 block">
+                                {soc.platform}
+                              </span>
+                              <span className="font-mono text-[#0A84FF] font-medium">@{soc.handleNormalized}</span>
+                            </div>
+                            <ExternalLink className="w-4 h-4 text-white/40" />
+                          </a>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Original Research Notes */}
+                  <div>
+                    <h4 className="text-xs font-semibold text-white/50 uppercase tracking-wider mb-2">
+                      Initial Research Notes
+                    </h4>
+                    <div className="p-3.5 rounded-xl bg-white/[0.02] border border-white/10 text-xs text-white/80 whitespace-pre-line leading-relaxed font-sans">
+                      {linkedProspect.notes || 'No initial notes.'}
+                    </div>
+                  </div>
+
+                  {/* Attribution Details */}
+                  <div className="pt-3 border-t border-white/[0.06] flex items-center justify-between text-xs text-white/45">
+                    <span className="flex items-center gap-1.5">
+                      <UserCheck className="w-3.5 h-3.5 text-white/40" />
+                      <span>Added by <strong className="text-white/70">{linkedProspect.addedByName || 'Teammate'}</strong></span>
+                    </span>
+                    <span>Created: {new Date(linkedProspect.createdAt).toLocaleDateString()}</span>
+                  </div>
+                </div>
+              </div>
+            )
           )}
         </div>
       </div>

@@ -1,6 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
-title Basim CRM - Starting Server...
+title Basim CRM - Server Console
 
 cd /d "%~dp0"
 
@@ -25,7 +25,20 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-:: 2. Check if .env.local exists
+:: 2. Check if server is already running on port 3000
+set ALREADY_RUNNING=0
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr /r /c:":3000 .*LISTENING"') do (
+    set ALREADY_RUNNING=1
+)
+if "!ALREADY_RUNNING!"=="1" (
+    echo [INFO] Basim CRM is already running!
+    echo [INFO] Opening http://localhost:3000 in your browser...
+    start http://localhost:3000
+    timeout /t 3 /nobreak >nul
+    exit /b 0
+)
+
+:: 3. Check if .env.local exists
 if not exist ".env.local" (
     echo [WARNING] .env.local not found. Creating from .env.example...
     copy ".env.example" ".env.local" >nul
@@ -35,7 +48,7 @@ if not exist ".env.local" (
     echo.
 )
 
-:: 3. Check node_modules
+:: 4. Check node_modules
 if not exist "node_modules" (
     echo [INFO] node_modules folder missing. Running npm install...
     call npm install
@@ -46,12 +59,15 @@ if not exist "node_modules" (
     )
 )
 
-:: 4. Launch browser after 3 seconds in background
-start "" cmd /c "timeout /t 3 /nobreak >nul && start http://localhost:3000"
+:: 5. Launch background watcher that waits until HTTP 200 before opening browser
+start "" /b powershell -NoProfile -ExecutionPolicy Bypass -Command "for ($i=0; $i -lt 45; $i++) { Start-Sleep -Seconds 1; try { $r = Invoke-WebRequest -Uri 'http://localhost:3000' -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue; if ($r -and $r.StatusCode -eq 200) { Start-Process 'http://localhost:3000'; break } } catch {} }"
 
-:: 5. Start Next.js development server
-echo [INFO] Starting Next.js Dev Server on http://localhost:3000 ...
-echo Press Ctrl + C to stop the server at any time.
+:: 6. Start Next.js development server
+echo [INFO] Starting Next.js Dev Server...
+echo [INFO] Full URL: http://localhost:3000  (or http://127.0.0.1:3000)
+echo [NOTE] Your browser will open automatically once the server is ready.
+echo [NOTE] Keep this window open while using the CRM.
+echo [NOTE] To turn off the server: double-click 'TURN OFF Basim CRM' on your desktop.
 echo.
 
 call npm run dev

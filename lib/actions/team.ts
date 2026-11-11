@@ -275,7 +275,8 @@ export async function getTeamMembersAction() {
       color: m.avatar_color ? `bg-[${m.avatar_color}]` : 'bg-[#0A84FF]',
       initials: initials || 'TM',
       isActive: m.is_active !== false,
-      createdAt: m.created_at
+      createdAt: m.created_at,
+      lastSeenAt: m.last_seen_at || m.updated_at || m.created_at
     };
   });
 }
@@ -310,6 +311,57 @@ export async function getCurrentUserAction() {
     color: member.avatar_color ? `bg-[${member.avatar_color}]` : 'bg-[#0A84FF]',
     initials: initials || 'TM',
     isActive: member.is_active !== false,
-    createdAt: member.created_at
+    createdAt: member.created_at,
+    lastSeenAt: member.last_seen_at || member.updated_at || member.created_at
   };
+}
+
+export async function logAuthEventAction(params: {
+  action: 'auth.login_success' | 'auth.logout' | 'auth.login_failed';
+  userId?: string;
+  email: string;
+  userAgent?: string;
+  failureReason?: string;
+}) {
+  try {
+    const adminClient = createAdminClient();
+    const cleanUa = params.userAgent ? params.userAgent.slice(0, 200) : 'Unknown device';
+    await adminClient.from('audit_log').insert({
+      user_id: params.userId || null,
+      action: params.action,
+      target: params.email.toLowerCase(),
+      metadata: {
+        email: params.email.toLowerCase(),
+        userAgent: cleanUa,
+        failureReason: params.failureReason ? params.failureReason.slice(0, 200) : undefined,
+        timestamp: new Date().toISOString()
+      }
+    });
+    return { success: true };
+  } catch (err: any) {
+    console.warn('Failed to log auth event:', err?.message);
+    return { success: false };
+  }
+}
+
+export async function getAuthActivityLogsAction() {
+  await verifyAdminCaller();
+  const adminClient = createAdminClient();
+  const { data, error } = await adminClient
+    .from('audit_log')
+    .select('id, user_id, action, target, metadata, created_at')
+    .in('action', ['auth.login_success', 'auth.logout', 'auth.login_failed'])
+    .order('created_at', { ascending: false })
+    .limit(30);
+
+  if (error || !data) return [];
+  return data.map((d: any) => ({
+    id: d.id,
+    userId: d.user_id,
+    action: d.action as 'auth.login_success' | 'auth.logout' | 'auth.login_failed',
+    email: d.target || (d.metadata && d.metadata.email) || '',
+    createdAt: d.created_at,
+    userAgent: d.metadata?.userAgent || 'Browser on Desktop',
+    failureReason: d.metadata?.failureReason
+  }));
 }

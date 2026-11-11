@@ -1,6 +1,6 @@
 'use client';
 
-import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { 
   User, 
@@ -12,10 +12,13 @@ import {
   GmailAccount,
   DoNotContactEntry,
   TodayDashboardStats,
-  PipelineStatus 
+  PipelineStatus,
+  TeammateStatus,
+  PresencePayload,
+  TeammatePresenceInfo
 } from '@/types';
 import { createClient } from '@/lib/supabase/client';
-import { getTeamMembersAction, getCurrentUserAction } from './actions/team';
+import { getTeamMembersAction, getCurrentUserAction, logAuthEventAction } from './actions/team';
 import { getContactsAction, updateContactStatusAction, addContactNoteAction } from './actions/contacts';
 import { 
   searchCrmThreadsAction, 
@@ -29,11 +32,15 @@ import { getGmailAccountsAction, updateDailyCapAction } from './actions/mailboxe
 import { getDoNotContactListAction, addToDoNotContactAction, removeFromDoNotContactAction } from './actions/do-not-contact';
 import { sendOutreachOrReplyAction } from './actions/sending';
 import { calculateWarmupDailyCap } from './deliverability';
+import { formatLastSeen } from './presence';
 
 interface AppContextType {
   users: User[];
   currentUser: User;
   authenticatedUser: User | null;
+  isAuthLoading: boolean;
+  authError: string | null;
+  reloadAuth: () => Promise<void>;
   logout: () => Promise<void>;
   contacts: Contact[];
   threads: Thread[];
@@ -46,8 +53,8 @@ interface AppContextType {
   setSelectedThreadId: (id: string | null) => void;
   selectedContactId: string | null;
   setSelectedContactId: (id: string | null) => void;
-  activeView: 'inbox' | 'sent' | 'contacts' | 'settings' | 'archived' | 'today';
-  setActiveView: (view: 'inbox' | 'sent' | 'contacts' | 'settings' | 'archived' | 'today') => void;
+  activeView: 'inbox' | 'sent' | 'contacts' | 'prospects' | 'settings' | 'archived' | 'today';
+  setActiveView: (view: 'inbox' | 'sent' | 'contacts' | 'prospects' | 'settings' | 'archived' | 'today') => void;
   statusFilter: string;
   setStatusFilter: (status: string) => void;
   mineEveryoneFilter: 'mine' | 'everyone';
@@ -63,6 +70,19 @@ interface AppContextType {
   soundEnabled: boolean;
   setSoundEnabled: (enabled: boolean) => void;
   
+  // Real Presence & Collaboration
+  teammatePresences: TeammatePresenceInfo[];
+  activeCollaborator: User | null;
+  activeCollaborators: TeammatePresenceInfo[];
+  isReplying: boolean;
+  setIsReplying: (replying: boolean) => void;
+  isComposeOpen: boolean;
+  setIsComposeOpen: (open: boolean) => void;
+  activeProspectId: string | null;
+  setActiveProspectId: (id: string | null) => void;
+  activeProspectKey: string | null;
+  setActiveProspectKey: (key: string | null) => void;
+
   // Actions
   sendReply: (threadId: string, body: string) => Promise<{ success: boolean; error?: string }>;
   composeEmail: (
@@ -71,7 +91,8 @@ interface AppContextType {
     company: string, 
     subject: string, 
     body: string,
-    adminOverride?: boolean
+    adminOverride?: boolean,
+    prospectId?: string
   ) => Promise<{ success: boolean; error?: string; collision?: any }>;
   updateContactStatus: (contactId: string, status: PipelineStatus) => Promise<void>;
   addInternalNote: (contactId: string, content: string) => Promise<void>;
@@ -85,7 +106,6 @@ interface AppContextType {
   syncGmail: () => Promise<void>;
   updateGmailConfig: (newConfig: Partial<GmailConfig>) => void;
   isSyncing: boolean;
-  activeCollaborator: User | null;
   todayStats: TodayDashboardStats;
 }
 
@@ -122,6 +142,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [users, setUsers] = useState<User[]>([]);
   const [authenticatedUser, setAuthenticatedUser] = useState<User | null>(null);
   const [currentUser, setCurrentUser] = useState<User>(DEFAULT_USER);
+  const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
+  const [authError, setAuthError] = useState<string | null>(null);
+
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [threads, setThreads] = useState<Thread[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -132,7 +155,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [selectedContactId, setSelectedContactId] = useState<string | null>(null);
-  const [activeView, setActiveView] = useState<'inbox' | 'sent' | 'contacts' | 'settings' | 'archived' | 'today'>('inbox');
+  const [activeView, setActiveView] = useState<'inbox' | 'sent' | 'contacts' | 'prospects' | 'settings' | 'archived' | 'today'>('inbox');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [mineEveryoneFilter, setMineEveryoneFilter] = useState<'mine' | 'everyone'>('everyone');
   const [activeAccountIdFilter, setActiveAccountIdFilter] = useState<string>('all');
@@ -141,10 +164,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [hasMoreThreads, setHasMoreThreads] = useState<boolean>(false);
   const [threadPage, setThreadPage] = useState<number>(0);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
-  const [activeCollaborator, setActiveCollaborator] = useState<User | null>(null);
   const [dueRemindersCount, setDueRemindersCount] = useState<number>(0);
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
 
+  // Presence state
+  const [presenceStateMap, setPresenceStateMap] = useState<Record<string, PresencePayload[]>>({});
+  const [isIdle, setIsIdle] = useState<boolean>(false);
+  const [isReplying, setIsReplying] = useState<boolean>(false);
+  const [isComposeOpen, setIsComposeOpen] = useState<boolean>(false);
+  const [activeProspectId, setActiveProspectId] = useState<string | null>(null);
+  const [activeProspectKey, setActiveProspectKey] = useState<string | null>(null);
+
+  const presenceChannelRef = useRef<any>(null);
+  const lastPersistTimeRef = useRef<number>(0);
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Convert SearchResultThread to Thread format
@@ -168,20 +200,80 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // Fetch initial data from Supabase
   const loadInitialData = useCallback(async () => {
     setIsLoadingThreads(true);
+    setIsAuthLoading(true);
+    setAuthError(null);
+
+    // Watchdog: Max 3 seconds for loading, then show error state with retry
+    const watchdogTimer = setTimeout(() => {
+      setIsAuthLoading(prev => {
+        if (prev) {
+          setAuthError('Connection timed out while loading user profile.');
+        }
+        return false;
+      });
+    }, 3000);
+
     try {
-      const [currUser, teamList, accounts, contactList, dncList, searchRes] = await Promise.all([
-        getCurrentUserAction(),
+      const supabase = createClient();
+      const { data: authData } = await supabase.auth.getUser();
+
+      if (!authData?.user) {
+        clearTimeout(watchdogTimer);
+        setIsAuthLoading(false);
+        router.push('/login');
+        return;
+      }
+
+      // Read current user
+      let currUser = await getCurrentUserAction();
+      if (!currUser) {
+        // Fallback: Query directly from team_members
+        const { data: tm } = await supabase
+          .from('team_members')
+          .select('*')
+          .eq('id', authData.user.id)
+          .single();
+
+        if (tm) {
+          const initials = tm.name
+            .split(' ')
+            .map((p: string) => p[0])
+            .join('')
+            .slice(0, 2)
+            .toUpperCase() || 'TM';
+
+          currUser = {
+            id: tm.id,
+            name: tm.name,
+            email: tm.email,
+            role: tm.role === 'admin' ? 'Lead & Business Development (admin)' : 'Outreach & Partnerships',
+            systemRole: tm.role as 'admin' | 'member',
+            color: tm.avatar_color ? `bg-[${tm.avatar_color}]` : 'bg-[#0A84FF]',
+            initials,
+            isActive: tm.is_active !== false,
+            createdAt: tm.created_at,
+            lastSeenAt: tm.last_seen_at
+          };
+        }
+      }
+
+      if (!currUser) {
+        clearTimeout(watchdogTimer);
+        setAuthError('Your team account could not be found.');
+        setIsAuthLoading(false);
+        return;
+      }
+
+      setCurrentUser(currUser);
+      setAuthenticatedUser(currUser);
+
+      const [teamList, accounts, contactList, dncList, searchRes] = await Promise.all([
         getTeamMembersAction(),
         getGmailAccountsAction(),
         getContactsAction(),
         getDoNotContactListAction(),
         searchCrmThreadsAction('', 0, 30),
       ]);
-
-      if (currUser) {
-        setCurrentUser(currUser);
-        setAuthenticatedUser(currUser);
-      }
 
       setUsers(teamList);
       setGmailAccounts(accounts);
@@ -196,16 +288,318 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (mappedThreads.length > 0 && !selectedThreadId) {
         setSelectedThreadId(mappedThreads[0].id);
       }
-    } catch (err) {
+
+      clearTimeout(watchdogTimer);
+      setIsAuthLoading(false);
+      setAuthError(null);
+    } catch (err: any) {
       console.error('Error loading initial data from Supabase:', err);
+      clearTimeout(watchdogTimer);
+      setAuthError(err?.message || 'Failed to load team data.');
+      setIsAuthLoading(false);
     } finally {
       setIsLoadingThreads(false);
     }
-  }, [mapSearchThread, selectedThreadId]);
+  }, [mapSearchThread, selectedThreadId, router]);
 
   useEffect(() => {
     loadInitialData();
   }, [loadInitialData]);
+
+  // Auth State Listener
+  useEffect(() => {
+    const supabase = createClient();
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === 'SIGNED_OUT' || !session) {
+        setCurrentUser(DEFAULT_USER);
+        setAuthenticatedUser(null);
+        router.push('/login');
+      } else if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
+        loadInitialData();
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, [router, loadInitialData]);
+
+  // Compute Current Activity String
+  const currentActivityText = useMemo(() => {
+    if (isComposeOpen) {
+      return 'Writing new outreach';
+    }
+    if (isReplying && selectedThreadId) {
+      const currentThread = threads.find(t => t.id === selectedThreadId);
+      const targetName = currentThread?.contactName || currentThread?.contactEmail || 'contact';
+      return `Replying to ${targetName}`;
+    }
+    if (selectedThreadId) {
+      const currentThread = threads.find(t => t.id === selectedThreadId);
+      const subject = currentThread?.subject || '(No Subject)';
+      return `Viewing: ${subject}`;
+    }
+    return 'Browsing inbox';
+  }, [isComposeOpen, isReplying, selectedThreadId, threads]);
+
+  const latestPresenceRef = useRef({
+    isIdle,
+    selectedThreadId,
+    activeProspectId,
+    activeProspectKey,
+    currentActivityText
+  });
+  latestPresenceRef.current = {
+    isIdle,
+    selectedThreadId,
+    activeProspectId,
+    activeProspectKey,
+    currentActivityText
+  };
+
+  const persistLastSeen = useCallback(async () => {
+    if (!currentUser || !currentUser.id) return;
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.rpc('update_my_last_seen');
+      if (error) {
+        await supabase
+          .from('team_members')
+          .update({ last_seen_at: new Date().toISOString() })
+          .eq('id', currentUser.id);
+      }
+    } catch {}
+  }, [currentUser]);
+
+  // Supabase Realtime Presence Channel
+  useEffect(() => {
+    if (!currentUser || !currentUser.id) return;
+
+    const supabase = createClient();
+    const channel = supabase.channel('team-presence', {
+      config: {
+        presence: { key: currentUser.id }
+      }
+    });
+
+    presenceChannelRef.current = channel;
+
+    channel.on('presence', { event: 'sync' }, () => {
+      const rawState = channel.presenceState() as Record<string, PresencePayload[]>;
+      setPresenceStateMap(rawState);
+    });
+
+    channel.subscribe(async (status) => {
+      if (status === 'SUBSCRIBED') {
+        try {
+          const current = latestPresenceRef.current;
+          await channel.track({
+            user_id: currentUser.id,
+            name: currentUser.name,
+            email: currentUser.email,
+            avatar_color: currentUser.color,
+            initials: currentUser.initials,
+            status: current.isIdle ? 'idle' : 'online',
+            current_thread_id: current.selectedThreadId,
+            current_prospect_id: current.activeProspectId,
+            current_prospect_key: current.activeProspectKey,
+            current_activity: current.currentActivityText,
+            last_active_at: new Date().toISOString()
+          });
+        } catch (e) {
+          console.warn('Presence track error:', e);
+        }
+      }
+    });
+
+    return () => {
+      try {
+        channel.untrack().catch(() => {});
+        channel.unsubscribe();
+      } catch {}
+      presenceChannelRef.current = null;
+    };
+  }, [currentUser.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Update Presence on Activity / Thread / Prospect / Idle change
+  useEffect(() => {
+    const channel = presenceChannelRef.current;
+    if (!channel || !currentUser || !currentUser.id) return;
+
+    channel.track({
+      user_id: currentUser.id,
+      name: currentUser.name,
+      email: currentUser.email,
+      avatar_color: currentUser.color,
+      initials: currentUser.initials,
+      status: isIdle ? 'idle' : 'online',
+      current_thread_id: selectedThreadId,
+      current_prospect_id: activeProspectId,
+      current_prospect_key: activeProspectKey,
+      current_activity: currentActivityText,
+      last_active_at: new Date().toISOString()
+    }).catch(() => {});
+
+    // Update database last_seen_at at most once every 60 seconds
+    const now = Date.now();
+    if (now - lastPersistTimeRef.current > 60000) {
+      lastPersistTimeRef.current = now;
+      persistLastSeen();
+    }
+  }, [isIdle, selectedThreadId, activeProspectId, activeProspectKey, currentActivityText, currentUser, persistLastSeen]);
+
+  // 30-Second Presence Heartbeat
+  useEffect(() => {
+    const heartbeatTimer = setInterval(() => {
+      const channel = presenceChannelRef.current;
+      if (!channel || !currentUser || !currentUser.id) return;
+
+      channel.track({
+        user_id: currentUser.id,
+        name: currentUser.name,
+        email: currentUser.email,
+        avatar_color: currentUser.color,
+        initials: currentUser.initials,
+        status: isIdle ? 'idle' : 'online',
+        current_thread_id: selectedThreadId,
+        current_prospect_id: activeProspectId,
+        current_prospect_key: activeProspectKey,
+        current_activity: currentActivityText,
+        last_active_at: new Date().toISOString()
+      }).catch(() => {});
+
+      // Check last_seen persist
+      const now = Date.now();
+      if (now - lastPersistTimeRef.current > 60000) {
+        lastPersistTimeRef.current = now;
+        persistLastSeen();
+      }
+    }, 30000);
+
+    return () => clearInterval(heartbeatTimer);
+  }, [currentUser, isIdle, selectedThreadId, activeProspectId, activeProspectKey, currentActivityText, persistLastSeen]);
+
+  // Idle Tracking (5 minutes of inactivity or tab hidden)
+  useEffect(() => {
+    let idleTimer: NodeJS.Timeout;
+
+    const onUserInteraction = () => {
+      if (document.visibilityState === 'hidden') {
+        setIsIdle(true);
+        return;
+      }
+      setIsIdle(false);
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        setIsIdle(true);
+      }, 5 * 60 * 1000);
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        setIsIdle(true);
+      } else {
+        onUserInteraction();
+      }
+    };
+
+    window.addEventListener('mousemove', onUserInteraction, { passive: true });
+    window.addEventListener('keydown', onUserInteraction, { passive: true });
+    window.addEventListener('mousedown', onUserInteraction, { passive: true });
+    window.addEventListener('touchstart', onUserInteraction, { passive: true });
+    window.addEventListener('scroll', onUserInteraction, { passive: true });
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    onUserInteraction();
+
+    return () => {
+      clearTimeout(idleTimer);
+      window.removeEventListener('mousemove', onUserInteraction);
+      window.removeEventListener('keydown', onUserInteraction);
+      window.removeEventListener('mousedown', onUserInteraction);
+      window.removeEventListener('touchstart', onUserInteraction);
+      window.removeEventListener('scroll', onUserInteraction);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, []);
+
+  // Untrack on tab close
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (presenceChannelRef.current) {
+        try {
+          presenceChannelRef.current.untrack().catch(() => {});
+        } catch {}
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, []);
+
+  // Compute merged Teammate Presences (handles multiple tabs, highest activity wins)
+  const teammatePresences: TeammatePresenceInfo[] = useMemo(() => {
+    return users.map(user => {
+      const rawList = presenceStateMap[user.id] || [];
+      const gmailAcc = gmailAccounts.find(a => a.ownerUserId === user.id);
+      const sentToday = gmailAcc?.sentToday || 0;
+      const dailyCap = gmailAcc?.dailyCap || 5;
+
+      if (rawList.length === 0) {
+        return {
+          ...user,
+          status: 'offline' as TeammateStatus,
+          currentActivity: user.lastSeenAt ? `Last seen ${formatLastSeen(user.lastSeenAt)}` : 'Offline',
+          currentThreadId: null,
+          lastActiveAt: user.lastSeenAt || user.createdAt || new Date().toISOString(),
+          sentToday,
+          dailyCap
+        };
+      }
+
+      // Merge multiple tabs for the same user
+      // 1. Status: online > idle
+      const isOnline = rawList.some(p => p.status === 'online');
+      const status: TeammateStatus = isOnline ? 'online' : 'idle';
+
+      // 2. Activity: Replying > Writing > Viewing > Browsing
+      let bestPayload = rawList[0];
+      const activityScore = (act?: string) => {
+        if (!act) return 0;
+        if (act.startsWith('Replying')) return 4;
+        if (act.startsWith('Writing')) return 3;
+        if (act.startsWith('Viewing')) return 2;
+        return 1;
+      };
+
+      for (const p of rawList) {
+        if (activityScore(p.current_activity) > activityScore(bestPayload.current_activity)) {
+          bestPayload = p;
+        }
+      }
+
+      return {
+        ...user,
+        status,
+        currentActivity: bestPayload.current_activity || 'Online',
+        currentThreadId: bestPayload.current_thread_id || null,
+        currentProspectId: bestPayload.current_prospect_id || null,
+        currentProspectKey: bestPayload.current_prospect_key || null,
+        lastActiveAt: bestPayload.last_active_at || new Date().toISOString(),
+        sentToday,
+        dailyCap
+      };
+    });
+  }, [users, presenceStateMap, gmailAccounts]);
+
+  // Active Collaborators on selected thread (Collision Guard)
+  const activeCollaborators: TeammatePresenceInfo[] = useMemo(() => {
+    if (!selectedThreadId) return [];
+    return teammatePresences.filter(
+      t => t.id !== currentUser.id && t.currentThreadId === selectedThreadId && t.status !== 'offline'
+    );
+  }, [selectedThreadId, teammatePresences, currentUser.id]);
+
+  const activeCollaborator: User | null = activeCollaborators.length > 0 ? activeCollaborators[0] : null;
 
   // Debounced Search using Postgres FTS
   useEffect(() => {
@@ -236,7 +630,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     };
   }, [searchQuery, mapSearchThread, selectedThreadId]);
 
-  // Load more threads (pagination: 30 items per page)
+  // Load more threads (pagination)
   const loadMoreThreads = async () => {
     if (!hasMoreThreads || isLoadingThreads) return;
 
@@ -301,11 +695,26 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // Logout handler
   const logout = async () => {
     try {
+      if (presenceChannelRef.current) {
+        try {
+          await presenceChannelRef.current.untrack();
+        } catch {}
+      }
+
+      await logAuthEventAction({
+        action: 'auth.logout',
+        userId: currentUser.id || undefined,
+        email: currentUser.email || 'user@ourteam.io',
+        userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined
+      });
+
       const supabase = createClient();
       await supabase.auth.signOut();
     } catch (err) {
       console.warn('Sign out error:', err);
     } finally {
+      setCurrentUser(DEFAULT_USER);
+      setAuthenticatedUser(null);
       router.push('/login');
       router.refresh();
     }
@@ -363,7 +772,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     });
 
     if (res.success) {
-      // Re-fetch thread messages
       const updatedMessages = await loadThreadMessagesLazyAction(threadId);
       if (updatedMessages.success && updatedMessages.messages) {
         setMessages(updatedMessages.messages as any);
@@ -380,15 +788,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     company: string,
     subject: string,
     body: string,
-    adminOverride?: boolean
+    adminOverride?: boolean,
+    prospectId?: string
   ): Promise<{ success: boolean; error?: string; collision?: any }> => {
     const account = currentUserAccount;
-    if (!account.id) {
-      return { success: false, error: 'No active personal Gmail mailbox connected.' };
-    }
 
     const res = await sendOutreachOrReplyAction({
-      accountId: account.id,
+      accountId: account.id || currentUser.id,
       toEmail,
       toName,
       company,
@@ -396,102 +802,97 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       body,
       isReply: false,
       adminOverride,
+      prospectId,
       idempotencyKey: `compose-${Date.now()}`
     });
 
     if (res.success) {
-      // Refresh threads
-      const searchRes = await searchCrmThreadsAction('', 0, 30);
+      const [updatedContacts, updatedAccounts, searchRes] = await Promise.all([
+        getContactsAction(),
+        getGmailAccountsAction(),
+        searchCrmThreadsAction(searchQuery, 0, 30),
+      ]);
+      setContacts(updatedContacts);
+      setGmailAccounts(updatedAccounts);
       setThreads(searchRes.threads.map(mapSearchThread));
     }
 
-    return { 
-      success: res.success, 
-      error: res.error, 
-      collision: res.collisionWarning 
-    };
+    return res;
   };
 
-  // Update contact status
   const updateContactStatus = async (contactId: string, status: PipelineStatus) => {
     setContacts(prev => prev.map(c => c.id === contactId ? { ...c, status } : c));
     await updateContactStatusAction(contactId, status);
   };
 
-  // Add internal note
   const addInternalNote = async (contactId: string, content: string) => {
-    await addContactNoteAction(contactId, content);
+    const res = await addContactNoteAction(contactId, content);
+    if (res.success) {
+      const newNote: InternalNote = {
+        id: `note-${Date.now()}`,
+        contactId,
+        userId: currentUser.id,
+        userName: currentUser.name,
+        userColor: currentUser.color,
+        content: content.trim(),
+        createdAt: new Date().toISOString()
+      };
+      setNotes(prev => [newNote, ...prev]);
+    }
   };
 
-  // Toggle star
   const toggleStar = async (threadId: string) => {
     setThreads(prev => prev.map(t => t.id === threadId ? { ...t, starred: !t.starred } : t));
     await toggleThreadStarAction(threadId);
   };
 
-  // Assign thread
   const assignThread = async (threadId: string, userId: string) => {
     setThreads(prev => prev.map(t => t.id === threadId ? { ...t, assignedToUserId: userId } : t));
     await assignThreadAction(threadId, userId);
   };
 
-  // Mark thread read
   const markThreadRead = async (threadId: string) => {
     setThreads(prev => prev.map(t => t.id === threadId ? { ...t, unread: false } : t));
-    await markThreadReadAction(threadId, true);
+    await markThreadReadAction(threadId);
   };
 
-  // Mark thread not interested / DNC
   const markThreadNotInterested = async (threadId: string) => {
     const thread = threads.find(t => t.id === threadId);
-    if (!thread) return;
-
-    await addToDoNotContactAction({
-      type: 'email',
-      value: thread.contactEmail,
-      reason: 'Marked not interested / auto-opt out',
-      source: 'not_interested_action'
-    });
-
-    const updatedDnc = await getDoNotContactListAction();
-    setDoNotContactList(updatedDnc);
+    if (thread) {
+      const contact = contacts.find(c => c.email.toLowerCase() === thread.contactEmail.toLowerCase());
+      if (contact) {
+        await updateContactStatus(contact.id, 'Cold');
+      }
+    }
   };
 
-  // Add to DNC
   const addToDnc = async (value: string, type: 'email' | 'domain', reason: string) => {
-    await addToDoNotContactAction({ value, type, reason, source: 'manual' });
-    const updated = await getDoNotContactListAction();
-    setDoNotContactList(updated);
+    const res = await addToDoNotContactAction({ value, type, reason });
+    if (res.success) {
+      const dncList = await getDoNotContactListAction();
+      setDoNotContactList(dncList);
+    }
   };
 
-  // Remove from DNC
   const removeFromDnc = async (id: string) => {
+    setDoNotContactList(prev => prev.filter(e => e.id !== id));
     await removeFromDoNotContactAction(id);
-    const updated = await getDoNotContactListAction();
-    setDoNotContactList(updated);
   };
 
-  // Update account daily cap
   const updateAccountCap = async (accountId: string, newCap: number, warmupOverride?: boolean) => {
+    setGmailAccounts(prev => prev.map(a => a.id === accountId ? { ...a, dailyCap: newCap, warmupOverride: warmupOverride ?? a.warmupOverride } : a));
     await updateDailyCapAction(accountId, newCap, warmupOverride);
-    const updated = await getGmailAccountsAction();
-    setGmailAccounts(updated);
   };
 
-  // Sync Gmail
   const syncGmail = async () => {
     setIsSyncing(true);
     try {
-      await fetch('/api/sync', { method: 'POST' });
-      // Refresh mailbox and thread states
-      const [accounts, searchRes] = await Promise.all([
-        getGmailAccountsAction(),
-        searchCrmThreadsAction(searchQuery, 0, 30)
-      ]);
-      setGmailAccounts(accounts);
-      setThreads(searchRes.threads.map(mapSearchThread));
+      const res = await fetch('/api/sync', { credentials: 'same-origin' });
+      if (res.ok) {
+        await loadInitialData();
+      }
     } catch (err) {
-      console.warn('Sync failed:', err);
+      console.warn('Sync request failed:', err);
     } finally {
       setIsSyncing(false);
     }
@@ -507,6 +908,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         users,
         currentUser,
         authenticatedUser,
+        isAuthLoading,
+        authError,
+        reloadAuth: loadInitialData,
         logout,
         contacts,
         threads,
@@ -535,6 +939,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         dueRemindersCount,
         soundEnabled,
         setSoundEnabled,
+        teammatePresences,
+        activeCollaborator,
+        activeCollaborators,
+        isReplying,
+        setIsReplying,
+        isComposeOpen,
+        setIsComposeOpen,
+        activeProspectId,
+        setActiveProspectId,
+        activeProspectKey,
+        setActiveProspectKey,
         sendReply,
         composeEmail,
         updateContactStatus,
@@ -549,7 +964,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         syncGmail,
         updateGmailConfig,
         isSyncing,
-        activeCollaborator,
         todayStats
       }}
     >

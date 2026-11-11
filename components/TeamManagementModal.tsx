@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '@/lib/store';
 import { 
   Users, 
@@ -13,15 +13,20 @@ import {
   CheckCircle2, 
   AlertCircle,
   UserX,
-  UserCheck
+  UserCheck,
+  Clock,
+  LogIn
 } from 'lucide-react';
 import { 
   addTeammateAction, 
   setTeammateActiveStatusAction, 
   changeTeammateRoleAction, 
   triggerPasswordResetAction,
-  adminReset2FAAction 
+  adminReset2FAAction,
+  getAuthActivityLogsAction
 } from '@/lib/actions/team';
+import { formatLastSeen } from '@/lib/presence';
+import { AuthActivityLog } from '@/types';
 
 interface TeamManagementModalProps {
   isOpen: boolean;
@@ -39,6 +44,20 @@ export function TeamManagementModal({ isOpen, onClose }: TeamManagementModalProp
   const [password, setPassword] = useState('');
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [loading, setLoading] = useState(false);
+
+  // Recent auth activity logs
+  const [activityLogs, setActivityLogs] = useState<AuthActivityLog[]>([]);
+  const [isLoadingLogs, setIsLoadingLogs] = useState(false);
+
+  useEffect(() => {
+    if (isOpen && isAdmin) {
+      setIsLoadingLogs(true);
+      getAuthActivityLogsAction()
+        .then(logs => setActivityLogs(logs as AuthActivityLog[]))
+        .catch(err => console.warn('Failed to load auth logs:', err))
+        .finally(() => setIsLoadingLogs(false));
+    }
+  }, [isOpen, isAdmin]);
 
   if (!isOpen) return null;
 
@@ -119,9 +138,9 @@ export function TeamManagementModal({ isOpen, onClose }: TeamManagementModalProp
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-in fade-in">
-      <div className="relative w-full max-w-2xl rounded-2xl bg-black/80 border border-white/15 backdrop-blur-3xl shadow-apple-window p-6 text-white overflow-hidden">
+      <div className="relative w-full max-w-2xl rounded-2xl bg-black/80 border border-white/15 backdrop-blur-3xl shadow-apple-window p-6 text-white overflow-hidden max-h-[90vh] flex flex-col">
         {/* Header */}
-        <div className="flex items-center justify-between pb-4 border-b border-white/10">
+        <div className="flex items-center justify-between pb-4 border-b border-white/10 shrink-0">
           <div className="flex items-center space-x-2.5">
             <div className="w-8 h-8 rounded-xl bg-[#0A84FF]/20 border border-[#0A84FF]/30 flex items-center justify-center text-[#0A84FF]">
               <Shield className="w-4 h-4" strokeWidth={2} />
@@ -141,7 +160,7 @@ export function TeamManagementModal({ isOpen, onClose }: TeamManagementModalProp
 
         {/* Feedback Alert */}
         {feedback && (
-          <div className={`mt-4 p-3 rounded-xl text-xs flex items-center gap-2 ${
+          <div className={`mt-4 p-3 rounded-xl text-xs flex items-center gap-2 shrink-0 ${
             feedback.type === 'success' 
               ? 'bg-[#30D158]/15 border border-[#30D158]/30 text-[#30D158]' 
               : 'bg-red-500/15 border border-red-500/30 text-red-400'
@@ -158,7 +177,7 @@ export function TeamManagementModal({ isOpen, onClose }: TeamManagementModalProp
             <p className="text-xs text-white/50 mt-1">Only team administrators can view or modify team membership.</p>
           </div>
         ) : (
-          <div className="mt-5 space-y-5 max-h-[65vh] overflow-y-auto pr-1">
+          <div className="mt-5 space-y-6 overflow-y-auto pr-1 flex-1">
             {/* Top Bar Action */}
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold uppercase tracking-wider text-white/40">Active Members ({users.length})</span>
@@ -250,7 +269,7 @@ export function TeamManagementModal({ isOpen, onClose }: TeamManagementModalProp
                     className="p-3.5 rounded-xl bg-white/[0.03] border border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-white/[0.05] transition-colors"
                   >
                     <div className="flex items-center space-x-3">
-                      <div className={`w-9 h-9 rounded-full ${u.color} text-white flex items-center justify-center font-bold text-xs ring-1 ring-white/20`}>
+                      <div className={`w-9 h-9 rounded-full ${u.color || 'bg-[#0A84FF]'} text-white flex items-center justify-center font-bold text-xs ring-1 ring-white/20`}>
                         {u.initials}
                       </div>
                       <div>
@@ -267,7 +286,14 @@ export function TeamManagementModal({ isOpen, onClose }: TeamManagementModalProp
                             {isUserAdmin ? 'Admin' : 'Member'}
                           </span>
                         </div>
-                        <p className="text-[11px] text-white/40">{u.email}</p>
+                        <div className="flex items-center gap-2 mt-0.5">
+                          <p className="text-[11px] text-white/40">{u.email}</p>
+                          <span className="text-white/20">•</span>
+                          <span className="text-[10.5px] text-white/50 flex items-center gap-1">
+                            <Clock className="w-3 h-3 text-white/30" />
+                            Last login: <strong className="text-white/70 font-normal">{u.lastSeenAt ? formatLastSeen(u.lastSeenAt) : 'Never'}</strong>
+                          </span>
+                        </div>
                       </div>
                     </div>
 
@@ -275,7 +301,7 @@ export function TeamManagementModal({ isOpen, onClose }: TeamManagementModalProp
                     <div className="flex items-center space-x-1.5 self-end sm:self-center">
                       <button
                         onClick={() => handleResetPassword(u.id, u.email)}
-                        className="px-2 py-1 rounded-lg text-[11px] bg-white/[0.06] hover:bg-white/[0.12] text-white/80 transition-colors"
+                        className="px-2 py-1 rounded-lg text-[11px] bg-white/[0.06] hover:bg-white/[0.12] text-white/80 transition-colors cursor-pointer"
                         title="Send password reset link"
                       >
                         Reset PW
@@ -283,7 +309,7 @@ export function TeamManagementModal({ isOpen, onClose }: TeamManagementModalProp
 
                       <button
                         onClick={() => handleReset2FA(u.id, u.name)}
-                        className="px-2 py-1 rounded-lg text-[11px] bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/20 transition-colors"
+                        className="px-2 py-1 rounded-lg text-[11px] bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/20 transition-colors cursor-pointer"
                         title="Reset 2FA and revoke recovery codes"
                       >
                         Reset 2FA
@@ -293,7 +319,7 @@ export function TeamManagementModal({ isOpen, onClose }: TeamManagementModalProp
                         <>
                           <button
                             onClick={() => handleChangeRole(u.id, isUserAdmin ? 'member' : 'admin')}
-                            className="px-2 py-1 rounded-lg text-[11px] bg-white/[0.06] hover:bg-white/[0.12] text-white/80 transition-colors"
+                            className="px-2 py-1 rounded-lg text-[11px] bg-white/[0.06] hover:bg-white/[0.12] text-white/80 transition-colors cursor-pointer"
                             title="Toggle role between admin and member"
                           >
                             {isUserAdmin ? 'Make Member' : 'Make Admin'}
@@ -301,7 +327,7 @@ export function TeamManagementModal({ isOpen, onClose }: TeamManagementModalProp
 
                           <button
                             onClick={() => handleToggleActive(u.id, u.isActive !== false)}
-                            className={`px-2 py-1 rounded-lg text-[11px] transition-colors ${
+                            className={`px-2 py-1 rounded-lg text-[11px] transition-colors cursor-pointer ${
                               u.isActive !== false
                                 ? 'bg-red-500/15 hover:bg-red-500/25 text-red-400 border border-red-500/20'
                                 : 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/20'
@@ -316,6 +342,77 @@ export function TeamManagementModal({ isOpen, onClose }: TeamManagementModalProp
                   </div>
                 );
               })}
+            </div>
+
+            {/* Recent Login & Auth Activity Section */}
+            <div className="pt-4 border-t border-white/10 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-2">
+                  <Clock className="w-3.5 h-3.5 text-[#0A84FF]" />
+                  <span className="text-xs font-semibold uppercase tracking-wider text-white/60">
+                    Recent Login Activity
+                  </span>
+                </div>
+                <span className="text-[10.5px] text-white/40 font-mono">
+                  {activityLogs.length} events logged
+                </span>
+              </div>
+
+              {isLoadingLogs ? (
+                <div className="py-4 text-center text-xs text-white/40 animate-pulse">
+                  Loading recent activity...
+                </div>
+              ) : activityLogs.length === 0 ? (
+                <div className="py-4 text-center text-xs text-white/40">
+                  No recent authentication events found.
+                </div>
+              ) : (
+                <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                  {activityLogs.map(log => {
+                    const isSuccess = log.action === 'auth.login_success';
+                    const isFail = log.action === 'auth.login_failed';
+                    const isLogout = log.action === 'auth.logout';
+
+                    return (
+                      <div 
+                        key={log.id}
+                        className="p-2.5 rounded-xl bg-white/[0.03] border border-white/[0.06] flex items-center justify-between gap-3 text-xs"
+                      >
+                        <div className="flex items-center space-x-2.5 min-w-0">
+                          <span className={`w-2 h-2 rounded-full shrink-0 ${
+                            isSuccess ? 'bg-[#30D158]' : isFail ? 'bg-[#FF453A]' : 'bg-white/40'
+                          }`} />
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-semibold text-white/90 truncate">
+                                {log.email}
+                              </span>
+                              <span className={`text-[9.5px] px-1.5 py-0.2 rounded-full font-medium ${
+                                isSuccess ? 'bg-[#30D158]/15 text-[#30D158] border border-[#30D158]/30' :
+                                isFail ? 'bg-[#FF453A]/15 text-[#FF453A] border border-[#FF453A]/30' :
+                                'bg-white/10 text-white/60'
+                              }`}>
+                                {isSuccess ? 'Sign In' : isFail ? 'Failed Attempt' : 'Sign Out'}
+                              </span>
+                            </div>
+                            <div className="text-[10px] text-white/40 truncate mt-0.5">
+                              {log.failureReason ? (
+                                <span className="text-red-400">{log.failureReason}</span>
+                              ) : (
+                                log.userAgent || 'Web browser'
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        <span className="text-[10.5px] text-white/40 shrink-0 font-mono">
+                          {formatLastSeen(log.createdAt)}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
         )}

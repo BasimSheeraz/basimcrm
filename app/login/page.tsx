@@ -4,6 +4,7 @@ import React, { useState, useEffect, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { verifyRecoveryCodeLoginAction } from '@/lib/actions/two-factor';
+import { logAuthEventAction } from '@/lib/actions/team';
 import { Mail, Lock, Shield, Key, AlertCircle, ArrowRight, Eye, EyeOff, Loader2 } from 'lucide-react';
 
 function LoginContent() {
@@ -52,6 +53,12 @@ function LoginContent() {
       if (error) {
         setErrorMessage(error.message || 'Invalid email or password.');
         setLoading(false);
+        logAuthEventAction({
+          action: 'auth.login_failed',
+          email: email.trim().toLowerCase(),
+          userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined,
+          failureReason: error.message
+        });
         return;
       }
 
@@ -82,9 +89,23 @@ function LoginContent() {
       }
 
       // User authenticated successfully without requiring MFA
+      const { data: authUserData } = await supabase.auth.getUser();
+      await logAuthEventAction({
+        action: 'auth.login_success',
+        userId: authUserData.user?.id,
+        email: email.trim().toLowerCase(),
+        userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined
+      });
+
       router.push('/');
       router.refresh();
     } catch (err: any) {
+      logAuthEventAction({
+        action: 'auth.login_failed',
+        email: email.trim().toLowerCase(),
+        userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined,
+        failureReason: err?.message || 'Unexpected error'
+      });
       setErrorMessage(err?.message || 'An unexpected error occurred during sign-in.');
       setLoading(false);
     }
@@ -113,12 +134,32 @@ function LoginContent() {
       if (verify.error) {
         setErrorMessage(verify.error.message || 'Invalid verification code. Please try again.');
         setLoading(false);
+        logAuthEventAction({
+          action: 'auth.login_failed',
+          email: email.trim().toLowerCase(),
+          userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined,
+          failureReason: '2FA TOTP verification failed: ' + verify.error.message
+        });
         return;
       }
+
+      const { data: authUserData } = await supabase.auth.getUser();
+      await logAuthEventAction({
+        action: 'auth.login_success',
+        userId: authUserData.user?.id,
+        email: email.trim().toLowerCase(),
+        userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined
+      });
 
       router.push('/');
       router.refresh();
     } catch (err: any) {
+      logAuthEventAction({
+        action: 'auth.login_failed',
+        email: email.trim().toLowerCase(),
+        userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined,
+        failureReason: err?.message || '2FA TOTP error'
+      });
       setErrorMessage(err?.message || 'Verification failed. Please try again.');
       setLoading(false);
     }
@@ -142,13 +183,34 @@ function LoginContent() {
       if (!res.success) {
         setErrorMessage(res.error || 'Invalid or already used recovery code.');
         setLoading(false);
+        logAuthEventAction({
+          action: 'auth.login_failed',
+          email: email.trim().toLowerCase(),
+          userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined,
+          failureReason: 'Recovery code failed: ' + (res.error || 'Invalid code')
+        });
         return;
       }
 
       // Recovery code verified and consumed, proceed to dashboard
+      const supabase = createClient();
+      const { data: authUserData } = await supabase.auth.getUser();
+      await logAuthEventAction({
+        action: 'auth.login_success',
+        userId: authUserData.user?.id,
+        email: email.trim().toLowerCase(),
+        userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined
+      });
+
       router.push('/');
       router.refresh();
     } catch (err: any) {
+      logAuthEventAction({
+        action: 'auth.login_failed',
+        email: email.trim().toLowerCase(),
+        userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined,
+        failureReason: err?.message || 'Recovery code error'
+      });
       setErrorMessage(err?.message || 'Failed to verify recovery code.');
       setLoading(false);
     }

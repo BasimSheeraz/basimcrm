@@ -12,7 +12,8 @@ import {
   Clock, 
   Shield,
   Flame,
-  ShieldAlert
+  ShieldAlert,
+  UserPlus
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -122,6 +123,21 @@ export function Sidebar({ onOpenCompose, onOpenTeam, onOpenDnc }: SidebarProps) 
             <div className="flex items-center space-x-2.5">
               <Send className="w-4 h-4 text-white/80" strokeWidth={1.75} />
               <span>Sent Outreach</span>
+            </div>
+          </button>
+
+          {/* Prospects */}
+          <button
+            onClick={() => { setActiveView('prospects'); setStatusFilter('all'); }}
+            className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-[13px] font-medium transition-all ${
+              activeView === 'prospects'
+                ? 'bg-white/15 dark:bg-white/15 text-white shadow-sm border border-white/20'
+                : 'text-white/70 hover:text-white hover:bg-white/[0.07] border border-transparent'
+            }`}
+          >
+            <div className="flex items-center space-x-2.5">
+              <UserPlus className="w-4 h-4 text-[#0A84FF]" strokeWidth={1.75} />
+              <span>Prospects</span>
             </div>
           </button>
 

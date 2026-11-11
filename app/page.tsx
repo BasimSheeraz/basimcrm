@@ -6,6 +6,7 @@ import { Navbar } from '@/components/Navbar';
 import { Sidebar } from '@/components/Sidebar';
 import { InboxView } from '@/components/InboxView';
 import { ContactsView } from '@/components/ContactsView';
+import { ProspectsView } from '@/components/ProspectsView';
 import { SettingsView } from '@/components/SettingsView';
 import { TodayDashboardView } from '@/components/TodayDashboardView';
 import { DoNotContactModal } from '@/components/DoNotContactModal';
@@ -14,7 +15,8 @@ import { ContactDetailModal } from '@/components/ContactDetailModal';
 import { TeamManagementModal } from '@/components/TeamManagementModal';
 import { ChangePasswordModal } from '@/components/ChangePasswordModal';
 import { TwoFactorRecoveryModal } from '@/components/TwoFactorRecoveryModal';
-import { Inbox, Send, Users, Settings, Plus, Flame } from 'lucide-react';
+import { Inbox, Send, Users, Settings, Plus, Flame, UserPlus } from 'lucide-react';
+import { Prospect } from '@/types';
 
 export default function Home() {
   const { 
@@ -26,7 +28,12 @@ export default function Home() {
   } = useApp();
 
   const [isComposeOpen, setIsComposeOpen] = useState(false);
-  const [composeInitialTo, setComposeInitialTo] = useState<{ email: string; name: string; company: string } | undefined>(undefined);
+  const [composeInitialTo, setComposeInitialTo] = useState<{
+    email: string;
+    name: string;
+    company: string;
+    prospectId?: string;
+  } | undefined>(undefined);
   const [isTeamOpen, setIsTeamOpen] = useState(false);
   const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
   const [isRecoveryCodesOpen, setIsRecoveryCodesOpen] = useState(false);
@@ -39,8 +46,19 @@ export default function Home() {
     setIsComposeOpen(true);
   };
 
-  const handleOpenComposeTo = (email: string, name: string, company: string) => {
-    setComposeInitialTo({ email, name, company });
+  const handleOpenComposeTo = (email: string, name: string, company: string, prospectId?: string) => {
+    setComposeInitialTo({ email, name, company, prospectId });
+    setIsComposeOpen(true);
+  };
+
+  const handleEmailProspect = (prospect: Prospect) => {
+    if (!prospect.email) return;
+    setComposeInitialTo({
+      email: prospect.email,
+      name: prospect.fullName,
+      company: prospect.company || '',
+      prospectId: prospect.id,
+    });
     setIsComposeOpen(true);
   };
 
@@ -72,7 +90,9 @@ export default function Home() {
 
           <main className="flex-1 flex overflow-hidden relative">
             {activeView === 'today' ? (
-              <TodayDashboardView />
+              <TodayDashboardView onEmailProspect={handleEmailProspect} />
+            ) : activeView === 'prospects' ? (
+              <ProspectsView onEmailProspect={handleEmailProspect} />
             ) : activeView === 'contacts' ? (
               <ContactsView onOpenComposeTo={handleOpenComposeTo} />
             ) : activeView === 'settings' ? (
@@ -117,6 +137,16 @@ export default function Home() {
             title="Compose new outreach email"
           >
             <Plus className="w-5 h-5 text-white" strokeWidth={2.2} />
+          </button>
+
+          <button
+            onClick={() => { setActiveView('prospects'); setStatusFilter('all'); }}
+            className={`flex flex-col items-center space-y-0.5 py-1 px-2.5 rounded-xl transition-all ${
+              activeView === 'prospects' ? 'text-[#0A84FF]' : 'text-white/50 hover:text-white'
+            }`}
+          >
+            <UserPlus className="w-5 h-5" strokeWidth={1.75} />
+            <span className="text-[10px] font-medium">Prospects</span>
           </button>
 
           <button

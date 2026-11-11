@@ -3,6 +3,7 @@
 import { createClient as createServerClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { calculateNextScheduledSendTime, getPktTime } from '@/lib/deliverability';
+import { normalizeEmail } from '@/lib/prospect-normalization';
 
 export interface SendMessageParams {
   accountId: string;
@@ -16,6 +17,7 @@ export interface SendMessageParams {
   threadId?: string; // If replying
   isReply?: boolean;
   adminOverride?: boolean;
+  prospectId?: string;
   idempotencyKey: string;
 }
 
@@ -55,13 +57,39 @@ export async function sendOutreachOrReplyAction(
 
   // 2. Mailbox Ownership Authorization Check
   // CRITICAL SECURITY CONSTRAINT: Nobody can send from another teammate's mailbox!
-  const { data: account, error: accError } = await adminClient
+  let { data: account } = await adminClient
     .from('gmail_accounts')
     .select('id, owner_user_id, email, status, daily_cap, warmup_started_at, warmup_override')
     .eq('id', params.accountId)
-    .single();
+    .maybeSingle();
 
-  if (accError || !account) {
+  if (!account && params.accountId === currentMember.id) {
+    const { data: ownAcc } = await adminClient
+      .from('gmail_accounts')
+      .select('id, owner_user_id, email, status, daily_cap, warmup_started_at, warmup_override')
+      .eq('owner_user_id', currentMember.id)
+      .maybeSingle();
+
+    if (ownAcc) {
+      account = ownAcc;
+    } else {
+      const { data: createdAcc } = await adminClient
+        .from('gmail_accounts')
+        .insert({
+          owner_user_id: currentMember.id,
+          email: currentMember.email,
+          status: 'active',
+          daily_cap: 15,
+          warmup_started_at: new Date().toISOString(),
+          warmup_override: true,
+        })
+        .select('id, owner_user_id, email, status, daily_cap, warmup_started_at, warmup_override')
+        .single();
+      account = createdAcc;
+    }
+  }
+
+  if (!account) {
     return { success: false, error: 'Mailbox account not found.' };
   }
 
@@ -155,7 +183,142 @@ export async function sendOutreachOrReplyAction(
     return { success: false, error: errorMsg };
   }
 
-  // 6. Immediate Send (Reply) vs Queued Send (New Outreach with 45-120s delay)
+  // 6. Ensure Contact exists or is created, and link Prospect if present
+  const nowIso = new Date().toISOString();
+  let linkedContactId = existingContact?.id || null;
+
+  if (!linkedContactId) {
+    const { data: createdContact } = await adminClient
+      .from('contacts')
+      .insert({
+        name: (params.toName || cleanRecipientEmail.split('@')[0]).trim(),
+        email: cleanRecipientEmail,
+        company: (params.company || '').trim(),
+        status: 'Contacted',
+        owner_user_id: currentMember.id,
+        first_contacted_at: nowIso,
+        last_contacted_at: nowIso,
+        last_contacted_by_user_id: currentMember.id,
+        created_at: nowIso,
+        updated_at: nowIso,
+      })
+      .select('id')
+      .single();
+
+    if (createdContact?.id) {
+      linkedContactId = createdContact.id;
+    }
+  } else {
+    await adminClient
+      .from('contacts')
+      .update({
+        last_contacted_at: nowIso,
+        last_contacted_by_user_id: currentMember.id,
+        owner_user_id: existingContact?.owner_user_id || currentMember.id,
+        status: 'Contacted',
+        updated_at: nowIso,
+      })
+      .eq('id', linkedContactId);
+  }
+
+  // Create or update Thread & Message record so it appears in Sent Outreach & Contact Timeline
+  let activeThreadId = params.threadId || null;
+  if (!activeThreadId && !isReply) {
+    const { data: createdThread } = await adminClient
+      .from('threads')
+      .insert({
+        account_id: account.id,
+        gmail_thread_id: `local-thread-${Date.now()}`,
+        subject: params.subject,
+        snippet: params.body.slice(0, 140),
+        contact_id: linkedContactId,
+        contact_email: cleanRecipientEmail,
+        contact_name: (params.toName || cleanRecipientEmail.split('@')[0]).trim(),
+        contact_company: (params.company || '').trim(),
+        assigned_to_user_id: currentMember.id,
+        status: 'open',
+        unread: false,
+        last_message_at: nowIso,
+        created_at: nowIso,
+        updated_at: nowIso,
+      })
+      .select('id')
+      .single();
+
+    if (createdThread?.id) {
+      activeThreadId = createdThread.id;
+    }
+  }
+
+  if (activeThreadId) {
+    await adminClient.from('messages').insert({
+      account_id: account.id,
+      thread_id: activeThreadId,
+      contact_id: linkedContactId,
+      gmail_message_id: `local-msg-${Date.now()}`,
+      direction: 'outbound',
+      from_email: account.email,
+      from_name: currentMember.name,
+      to_email: cleanRecipientEmail,
+      cc_email: params.ccEmail || null,
+      bcc_email: params.bccEmail || null,
+      subject: params.subject,
+      body_text: params.body,
+      sent_at: nowIso,
+      sent_by_user_id: currentMember.id,
+    });
+  }
+
+  // Update matching Prospect status to 'contacted', set contacted_at and contact_id
+  const normalizedRecipient = normalizeEmail(cleanRecipientEmail);
+  let matchedProspect: any = null;
+
+  if (params.prospectId) {
+    const { data } = await adminClient
+      .from('prospects')
+      .select('id, full_name, status, source')
+      .eq('id', params.prospectId)
+      .maybeSingle();
+    matchedProspect = data;
+  } else if (normalizedRecipient) {
+    const { data } = await adminClient
+      .from('prospects')
+      .select('id, full_name, status, source')
+      .eq('email_normalized', normalizedRecipient)
+      .maybeSingle();
+    matchedProspect = data;
+  }
+
+  if (matchedProspect) {
+    const nextStatus = matchedProspect.status === 'replied' ? 'replied' : 'contacted';
+    await adminClient
+      .from('prospects')
+      .update({
+        status: nextStatus,
+        contacted_at: nowIso,
+        assigned_to: currentMember.id,
+        contact_id: linkedContactId,
+        updated_at: nowIso,
+      })
+      .eq('id', matchedProspect.id);
+
+    if (linkedContactId) {
+      await adminClient.from('audit_log').insert({
+        user_id: currentMember.id,
+        action: 'prospects.outreach_sent',
+        target: linkedContactId,
+        metadata: {
+          contact_id: linkedContactId,
+          prospect_id: matchedProspect.id,
+          sender_name: currentMember.name,
+          subject: params.subject,
+          source: matchedProspect.source || 'Prospects',
+        },
+      });
+    }
+  }
+
+  // 7. Immediate Send (Reply) vs Queued Send (New Outreach with 45-120s delay)
   if (isReply) {
     // Replies are dispatched immediately
     await adminClient.from('audit_log').insert({
@@ -178,7 +341,7 @@ export async function sendOutreachOrReplyAction(
   await adminClient.from('outbound_queue').insert({
     account_id: account.id,
     user_id: currentMember.id,
-    contact_id: existingContact?.id || null,
+    contact_id: linkedContactId,
     to_email: cleanRecipientEmail,
     cc_email: params.ccEmail || null,
     bcc_email: params.bccEmail || null,

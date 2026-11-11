@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '@/lib/store';
 import { 
   Send, 
@@ -10,14 +10,69 @@ import {
   Flame, 
   ShieldCheck, 
   RotateCcw,
-  Info
+  Sparkles,
+  ChevronRight
 } from 'lucide-react';
 import { getPktTime } from '@/lib/deliverability';
+import { Prospect } from '@/types';
+import { getTodayProspectQueueAction, claimNextProspectAction } from '@/lib/actions/prospects';
 
-export function TodayDashboardView() {
-  const { todayStats, currentUser, setActiveView, setSelectedThreadId } = useApp();
+interface TodayDashboardViewProps {
+  onEmailProspect?: (prospect: Prospect) => void;
+}
+
+export function TodayDashboardView({ onEmailProspect }: TodayDashboardViewProps) {
+  const { todayStats, currentUser, users, setActiveView } = useApp();
   const { teamTotals, accounts } = todayStats;
   const pkt = getPktTime();
+
+  const [queuesByUser, setQueuesByUser] = useState<Record<string, Prospect[]>>({});
+  const [unassignedCount, setUnassignedCount] = useState(0);
+  const [isLoadingQueue, setIsLoadingQueue] = useState(false);
+  const [isClaimingNext, setIsClaimingNext] = useState(false);
+
+  const loadQueue = async () => {
+    setIsLoadingQueue(true);
+    try {
+      const res = await getTodayProspectQueueAction();
+      if (res && res.queuesByUser) {
+        setQueuesByUser(res.queuesByUser);
+        setUnassignedCount(res.unassignedReadyCount || 0);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setIsLoadingQueue(false);
+    }
+  };
+
+  useEffect(() => {
+    loadQueue();
+  }, []);
+
+  const handleNextUp = async () => {
+    setIsClaimingNext(true);
+    try {
+      const res = await claimNextProspectAction();
+      if (res.success && res.prospect) {
+        if (onEmailProspect) {
+          onEmailProspect(res.prospect);
+        }
+        await loadQueue();
+      } else {
+        alert(res.error || 'No prospects ready with an email.');
+      }
+    } catch (err: any) {
+      alert(err.message || 'Failed to claim next prospect');
+    } finally {
+      setIsClaimingNext(false);
+    }
+  };
+
+  const totalAssignedInQueues = Object.values(queuesByUser).reduce(
+    (acc, list) => acc + list.length,
+    0
+  );
 
   return (
     <div className="flex-1 overflow-y-auto p-4 sm:p-8 space-y-6 animate-in fade-in duration-200">
@@ -238,6 +293,126 @@ export function TodayDashboardView() {
                     className="text-[#0A84FF] hover:underline font-semibold text-[11px]"
                   >
                     View Mailbox →
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Prospects To Contact Today Section */}
+      <div className="space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-1">
+          <div className="flex items-center gap-2.5">
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-white/40">
+              Prospects to Contact Today
+            </h2>
+            <span className="text-[10.5px] px-2 py-0.5 rounded-full bg-[#0A84FF]/15 text-[#0A84FF] border border-[#0A84FF]/25 font-semibold">
+              {totalAssignedInQueues} in queues • {unassignedCount} unassigned
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleNextUp}
+              disabled={isClaimingNext}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl apple-primary-btn text-xs font-semibold shadow-sm active:scale-95 transition-all disabled:opacity-40 cursor-pointer"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-white" />
+              <span>{isClaimingNext ? 'Claiming...' : 'Next Up'}</span>
+            </button>
+            <button
+              onClick={() => setActiveView('prospects')}
+              className="flex items-center gap-1 text-xs text-white/60 hover:text-white px-2.5 py-1.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 transition-colors cursor-pointer"
+            >
+              <span>View All</span>
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+
+        {/* Queues per team member */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {users.map((u) => {
+            const isMe = u.id === currentUser.id;
+            const userQueue = queuesByUser[u.id] || [];
+            return (
+              <div
+                key={u.id}
+                className={`p-4 rounded-2xl border transition-all flex flex-col justify-between space-y-3 ${
+                  isMe
+                    ? 'bg-[#0A84FF]/[0.05] border-[#0A84FF]/30 shadow-[0_4px_25px_rgba(10,132,255,0.06)]'
+                    : 'bg-white/[0.03] border-white/10'
+                }`}
+              >
+                <div>
+                  <div className="flex items-center justify-between mb-2.5 pb-2 border-b border-white/[0.06]">
+                    <div className="flex items-center space-x-2">
+                      <div className={`w-6 h-6 rounded-lg ${u.color || 'bg-blue-600'} text-white flex items-center justify-center font-bold text-[10px]`}>
+                        {u.initials || u.name.charAt(0)}
+                      </div>
+                      <span className="text-xs font-bold text-white/95">{u.name}</span>
+                      {isMe && (
+                        <span className="text-[9.5px] px-1.5 py-0.2 rounded bg-[#0A84FF]/20 text-[#0A84FF] border border-[#0A84FF]/30 font-medium">
+                          You
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-white/[0.06] border border-white/10 text-white/75 font-mono">
+                      {userQueue.length} ready
+                    </span>
+                  </div>
+
+                  {userQueue.length === 0 ? (
+                    <div className="py-6 text-center text-xs text-white/35">
+                      Queue empty. Click "Next Up" to pull an unassigned prospect!
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {userQueue.slice(0, 4).map((p) => (
+                        <div
+                          key={p.id}
+                          className="p-2.5 rounded-xl bg-white/[0.03] border border-white/5 hover:border-white/15 transition-colors flex items-center justify-between gap-2"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="font-semibold text-xs text-white/95 truncate">
+                              {p.fullName}
+                            </div>
+                            <div className="text-[11px] text-white/50 truncate">
+                              {p.company || p.email || 'No company'}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1 shrink-0">
+                            {p.email && onEmailProspect && (
+                              <button
+                                onClick={() => onEmailProspect(p)}
+                                className="px-2 py-1 rounded-lg apple-primary-btn text-[11px] font-semibold transition-all active:scale-95 cursor-pointer flex items-center gap-1"
+                              >
+                                <Send className="w-2.5 h-2.5" />
+                                <span>Email</span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                      {userQueue.length > 4 && (
+                        <div className="text-center text-[10.5px] text-white/40 pt-1">
+                          +{userQueue.length - 4} more in queue
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="pt-2 border-t border-white/[0.06] flex items-center justify-between text-[11px] text-white/40">
+                  <span>Assigned queue</span>
+                  <button
+                    onClick={() => setActiveView('prospects')}
+                    className="text-[#0A84FF] hover:underline font-semibold"
+                  >
+                    Manage →
                   </button>
                 </div>
               </div>

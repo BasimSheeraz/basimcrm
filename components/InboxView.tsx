@@ -61,6 +61,8 @@ export function InboxView() {
     markThreadNotInterested,
     updateContactStatus,
     activeCollaborator,
+    activeCollaborators,
+    setIsReplying,
     setSelectedContactId
   } = useApp();
 
@@ -129,8 +131,11 @@ export function InboxView() {
           setShowBcc(false);
         }
       }).catch(() => {});
+      setIsReplying(false);
+    } else {
+      setIsReplying(false);
     }
-  }, [selectedThreadId]);
+  }, [selectedThreadId, setIsReplying]);
 
   // Autosave draft every 3 seconds of typing
   useEffect(() => {
@@ -259,6 +264,17 @@ export function InboxView() {
       return;
     }
 
+    // Collaborative warning: if another teammate is replying to this contact, warn before sending
+    const replyingCollaborators = activeCollaborators.filter(c => c.currentActivity?.startsWith('Replying'));
+    if (replyingCollaborators.length > 0) {
+      const confirmed = window.confirm(
+        `Warning: ${replyingCollaborators.map(c => c.name).join(', ')} is currently replying to this contact. Are you sure you want to send this reply?`
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
+
     setIsSubmitting(true);
     setActionError(null);
 
@@ -273,6 +289,7 @@ export function InboxView() {
 
     setReplyText('');
     setAttachedFiles([]);
+    setIsReplying(false);
     setIsSubmitting(false);
     setShowSentSuccess(true);
     setTimeout(() => setShowSentSuccess(false), 3000);
@@ -753,19 +770,44 @@ export function InboxView() {
           <div className="p-3 sm:p-4 border-t border-white/[0.08] bg-white/[0.02] dark:bg-black/20 shrink-0">
             <div className="max-w-3xl mx-auto space-y-2">
               {/* Collision / Collaborative Guard */}
-              {activeCollaborator && (
-                <div className="p-2 px-3 rounded-xl bg-[#FF9F0A]/10 border border-[#FF9F0A]/20 flex items-center justify-between text-xs text-[#FF9F0A] animate-in fade-in">
-                  <div className="flex items-center space-x-2 min-w-0">
-                    <ShieldAlert className="w-3.5 h-3.5 text-[#FF9F0A] shrink-0" strokeWidth={1.75} />
-                    <span className="truncate">
-                      {activeCollaborator.name} is also viewing this thread.
-                    </span>
-                  </div>
-                  <span className="text-[10px] font-semibold text-[#FF9F0A]/80 uppercase tracking-wider">
-                    Viewing
-                  </span>
-                </div>
-              )}
+              {activeCollaborators.length > 0 && (() => {
+                const replyingTeammates = activeCollaborators.filter(c => c.currentActivity?.startsWith('Replying'));
+                const viewingTeammates = activeCollaborators.filter(c => !c.currentActivity?.startsWith('Replying'));
+
+                if (replyingTeammates.length > 0) {
+                  return (
+                    <div className="p-2.5 px-3 rounded-xl bg-[#FF9F0A]/20 border border-[#FF9F0A]/40 flex items-center justify-between text-xs text-[#FF9F0A] animate-in fade-in">
+                      <div className="flex items-center space-x-2 min-w-0">
+                        <AlertTriangle className="w-4 h-4 text-[#FF9F0A] shrink-0" strokeWidth={2} />
+                        <span className="truncate font-semibold">
+                          ⚠️ {replyingTeammates.map(t => t.name).join(' & ')} {replyingTeammates.length === 1 ? 'is' : 'are'} currently replying to this thread!
+                        </span>
+                      </div>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#FF9F0A]/25 border border-[#FF9F0A]/50 text-[#FF9F0A] uppercase tracking-wider shrink-0">
+                        Replying
+                      </span>
+                    </div>
+                  );
+                }
+
+                if (viewingTeammates.length > 0) {
+                  return (
+                    <div className="p-2 px-3 rounded-xl bg-[#FF9F0A]/10 border border-[#FF9F0A]/20 flex items-center justify-between text-xs text-[#FF9F0A] animate-in fade-in">
+                      <div className="flex items-center space-x-2 min-w-0">
+                        <ShieldAlert className="w-3.5 h-3.5 text-[#FF9F0A] shrink-0" strokeWidth={1.75} />
+                        <span className="truncate">
+                          {viewingTeammates.map(t => t.name).join(' & ')} {viewingTeammates.length === 1 ? 'is' : 'are'} also viewing this thread.
+                        </span>
+                      </div>
+                      <span className="text-[10px] font-semibold text-[#FF9F0A]/80 uppercase tracking-wider shrink-0">
+                        Viewing
+                      </span>
+                    </div>
+                  );
+                }
+
+                return null;
+              })()}
 
               {/* Mailbox Ownership Banner if viewer is not the owner */}
               {!isMailboxOwner ? (
@@ -847,7 +889,14 @@ export function InboxView() {
                     {/* Textarea */}
                     <textarea
                       value={replyText}
-                      onChange={(e) => setReplyText(e.target.value)}
+                      onFocus={() => setIsReplying(true)}
+                      onBlur={() => {
+                        if (!replyText.trim()) setIsReplying(false);
+                      }}
+                      onChange={(e) => {
+                        setReplyText(e.target.value);
+                        setIsReplying(e.target.value.trim().length > 0);
+                      }}
                       placeholder={`Reply to ${selectedThread.contactName}...`}
                       rows={lineCount}
                       className="w-full text-[13px] px-3 py-2 rounded-xl border border-white/10 bg-white/[0.04] dark:bg-black/30 text-white placeholder-white/35 focus:outline-none focus:border-[#0A84FF]/60 resize-none font-sans leading-relaxed transition-all"

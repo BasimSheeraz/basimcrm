@@ -3,6 +3,7 @@
 import { createClient as createServerClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { DoNotContactEntry } from '@/types';
+import { normalizeEmail } from '@/lib/prospect-normalization';
 
 export async function getDoNotContactListAction(): Promise<DoNotContactEntry[]> {
   const serverClient = createServerClient();
@@ -70,6 +71,22 @@ export async function addToDoNotContactAction(params: {
     }, { onConflict: 'value' });
 
   if (error) return { success: false, error: error.message };
+
+  // Also mark any matching prospects as 'do_not_contact'
+  if (params.type === 'email') {
+    const norm = normalizeEmail(cleanValue);
+    if (norm) {
+      await adminClient
+        .from('prospects')
+        .update({ status: 'do_not_contact', updated_at: new Date().toISOString() })
+        .eq('email_normalized', norm);
+    }
+  } else if (params.type === 'domain') {
+    await adminClient
+      .from('prospects')
+      .update({ status: 'do_not_contact', updated_at: new Date().toISOString() })
+      .ilike('email', `%@${cleanValue}`);
+  }
 
   // Log in audit trail
   await adminClient.from('audit_log').insert({
@@ -153,11 +170,19 @@ export async function markThreadNotInterestedAction(
     .eq('thread_id', threadId)
     .eq('status', 'pending');
 
-  // 4. Update contact status to Cold
+  // 4. Update contact status to Cold & prospect status to do_not_contact
   await adminClient
     .from('contacts')
     .update({ status: 'Cold' })
     .eq('email', cleanEmail);
+
+  const normEmail = normalizeEmail(cleanEmail);
+  if (normEmail) {
+    await adminClient
+      .from('prospects')
+      .update({ status: 'do_not_contact', updated_at: new Date().toISOString() })
+      .eq('email_normalized', normEmail);
+  }
 
   // 5. Audit log
   await adminClient.from('audit_log').insert({

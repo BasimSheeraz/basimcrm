@@ -136,6 +136,18 @@ CREATE POLICY "Team members can view gmail accounts"
   TO authenticated
   USING (public.is_team_member());
 
+CREATE OR REPLACE FUNCTION public.is_team_admin()
+RETURNS BOOLEAN
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+STABLE
+AS $$
+  SELECT public.is_admin();
+$$;
+
+GRANT EXECUTE ON FUNCTION public.is_team_admin() TO authenticated, service_role;
+
 -- Only the owner or an admin can update account settings (e.g. daily cap, pause/resume)
 DROP POLICY IF EXISTS "Account owners and admins can update accounts" ON public.gmail_accounts;
 CREATE POLICY "Account owners and admins can update accounts"
@@ -143,8 +155,8 @@ CREATE POLICY "Account owners and admins can update accounts"
   FOR UPDATE
   TO authenticated
   USING (
-    public.is_team_admin() OR 
-    owner_user_id = (SELECT id FROM public.team_members WHERE user_id = auth.uid() AND is_active = true)
+    public.is_admin() OR 
+    owner_user_id = auth.uid()
   );
 
 -- Service role full access
@@ -192,7 +204,7 @@ CREATE POLICY "Team members insert own queue"
   FOR INSERT
   TO authenticated
   WITH CHECK (
-    user_id = (SELECT id FROM public.team_members WHERE user_id = auth.uid() AND is_active = true)
+    user_id = auth.uid()
   );
 
 DROP POLICY IF EXISTS "Service role manages outbound queue" ON public.outbound_queue;

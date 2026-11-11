@@ -3,6 +3,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { createClient as createServerClient } from '@/lib/supabase/server';
 import { decryptToken } from '@/lib/crypto';
 import { isBounceMessage, isAutoReplyMessage, isOptOutMessage } from '@/lib/deliverability';
+import { normalizeEmail } from '@/lib/prospect-normalization';
 
 export const dynamic = 'force-dynamic';
 
@@ -248,11 +249,22 @@ async function handleMultiMailboxSync(req: NextRequest) {
         }
 
         // 1. Bounce detection
+        const snippet = msgFull.snippet || '';
         if (isBounceMessage(cleanFromEmail, subjectHeader)) {
           await adminClient.rpc('record_account_bounce', {
             p_account_id: account.id,
             p_contact_email: cleanFromEmail
           });
+
+          // Extract bounced recipient email from snippet or headers if present
+          const bouncedEmailMatch = snippet.match(/[^\s<>,"']+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+          const bouncedTarget = normalizeEmail(bouncedEmailMatch?.[0] || cleanFromEmail);
+          if (bouncedTarget) {
+            await adminClient
+              .from('prospects')
+              .update({ status: 'bad_email', updated_at: new Date().toISOString() })
+              .eq('email_normalized', bouncedTarget);
+          }
           continue;
         }
 
@@ -260,7 +272,7 @@ async function handleMultiMailboxSync(req: NextRequest) {
         const isAutoReply = isAutoReplyMessage(headers, subjectHeader);
 
         // 3. Opt-out detection
-        let snippet = msgFull.snippet || '';
+        const normFrom = normalizeEmail(cleanFromEmail);
         if (isOptOutMessage(snippet)) {
           await adminClient.from('do_not_contact').upsert({
             type: 'email',
@@ -269,6 +281,23 @@ async function handleMultiMailboxSync(req: NextRequest) {
             source: 'auto_opt_out',
             created_at: new Date().toISOString()
           }, { onConflict: 'value' });
+
+          if (normFrom) {
+            await adminClient
+              .from('prospects')
+              .update({ status: 'do_not_contact', updated_at: new Date().toISOString() })
+              .eq('email_normalized', normFrom);
+          }
+          continue;
+        }
+
+        // 4. Genuine Inbound Reply: mark matching prospect as 'replied'
+        if (!isAutoReply && normFrom && cleanFromEmail !== account.email.toLowerCase()) {
+          await adminClient
+            .from('prospects')
+            .update({ status: 'replied', updated_at: new Date().toISOString() })
+            .eq('email_normalized', normFrom)
+            .in('status', ['new', 'assigned', 'contacted']);
         }
       }
 

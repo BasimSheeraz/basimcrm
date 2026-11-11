@@ -9,6 +9,8 @@ export type PipelineStatus =
 
 export type UserRole = 'admin' | 'member';
 
+export type TeammateStatus = 'online' | 'idle' | 'offline';
+
 export interface User {
   id: string;
   name: string;
@@ -20,8 +22,44 @@ export interface User {
   password?: string;
   isActive?: boolean;
   createdAt?: string;
+  lastSeenAt?: string;
   has2FA?: boolean;
   connectedGmail?: string;
+}
+
+export interface PresencePayload {
+  user_id: string;
+  name: string;
+  email: string;
+  avatar_color: string;
+  initials: string;
+  status: TeammateStatus;
+  current_thread_id: string | null;
+  current_prospect_id?: string | null;
+  current_prospect_key?: string | null;
+  current_activity: string;
+  last_active_at: string;
+}
+
+export interface TeammatePresenceInfo extends User {
+  status: TeammateStatus;
+  currentActivity: string;
+  currentThreadId: string | null;
+  currentProspectId?: string | null;
+  currentProspectKey?: string | null;
+  lastActiveAt: string;
+  sentToday: number;
+  dailyCap: number;
+}
+
+export interface AuthActivityLog {
+  id: number;
+  userId: string | null;
+  action: 'auth.login_success' | 'auth.logout' | 'auth.login_failed';
+  email: string;
+  createdAt: string;
+  userAgent?: string;
+  failureReason?: string;
 }
 
 export type GmailAccountStatus = 'active' | 'needs_reconnect' | 'paused';
@@ -303,3 +341,89 @@ export interface DeliverabilityWarning {
   type: 'link_count' | 'first_email_attachment' | 'spam_words';
   message: string;
 }
+
+export type SocialPlatform =
+  | 'instagram'
+  | 'facebook'
+  | 'linkedin'
+  | 'tiktok'
+  | 'x'
+  | 'youtube'
+  | 'website'
+  | 'other';
+
+export type ProspectStatus =
+  | 'new'
+  | 'assigned'
+  | 'contacted'
+  | 'replied'
+  | 'not_interested'
+  | 'bad_email'
+  | 'do_not_contact';
+
+export interface ProspectSocial {
+  id: string;
+  prospectId: string;
+  platform: SocialPlatform;
+  handle: string;
+  handleNormalized: string;
+  profileUrl: string;
+  createdAt?: string;
+}
+
+export interface Prospect {
+  id: string;
+  fullName: string;
+  company: string;
+  email: string | null;
+  emailNormalized: string | null;
+  phone: string | null;
+  notes: string;
+  source: string;
+  status: ProspectStatus;
+  addedBy: string;
+  addedByName?: string;
+  addedByColor?: string;
+  addedByInitials?: string;
+  assignedTo: string | null;
+  assignedToName?: string;
+  assignedToColor?: string;
+  assignedToInitials?: string;
+  createdAt: string;
+  updatedAt: string;
+  contactedAt: string | null;
+  contactId: string | null;
+  socials: ProspectSocial[];
+}
+
+export interface ProspectDuplicateMatch {
+  type: 'exact_email' | 'exact_social' | 'existing_contact' | 'existing_thread' | 'do_not_contact';
+  blocking: boolean;
+  message: string;
+  existingProspectId?: string;
+  existingProspectName?: string;
+  existingContactId?: string;
+  addedByName?: string;
+  addedAt?: string;
+  status?: string;
+  matchedValue?: string;
+}
+
+export interface ProspectFuzzyWarning {
+  existingProspectId?: string;
+  existingContactId?: string;
+  fullName: string;
+  company: string;
+  email?: string | null;
+  addedByName: string;
+  addedAt: string;
+  status: string;
+  reason: string;
+}
+
+export interface ProspectDuplicateCheckResult {
+  hasExactDuplicate: boolean;
+  blockingMatches: ProspectDuplicateMatch[];
+  fuzzyWarnings: ProspectFuzzyWarning[];
+}
+

@@ -161,6 +161,10 @@ export async function getContactTimelineAction(contactId: string): Promise<Timel
       } else if (l.action === 'threads.assign') {
         type = 'assignment';
         title = 'Thread Owner Reassigned';
+      } else if (l.action === 'prospects.outreach_sent') {
+        type = 'email_outbound';
+        title = 'Outreach Sent from Prospects Queue';
+        desc = `Sent by ${l.metadata?.sender_name || 'Teammate'} • Subject: ${l.metadata?.subject || ''}`;
       }
 
       events.push({
