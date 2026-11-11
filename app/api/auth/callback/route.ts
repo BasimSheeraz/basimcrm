@@ -13,61 +13,57 @@ export async function GET(req: NextRequest) {
   const state = searchParams.get('state');
   const errorParam = searchParams.get('error');
 
+  const errorRedirect = (errorCode: string) => {
+    return NextResponse.redirect(`${origin}/settings?error=${encodeURIComponent(errorCode)}`);
+  };
+
   if (errorParam) {
-    return NextResponse.redirect(
-      `${origin}/?view=settings&error=${encodeURIComponent('Google authentication cancelled: ' + errorParam)}`
-    );
+    console.error('Google OAuth callback returned error:', errorParam);
+    return errorRedirect(`access_denied: ${errorParam}`);
   }
 
   if (!code || !state) {
-    return NextResponse.redirect(
-      `${origin}/?view=settings&error=missing_code_or_state`
-    );
+    return errorRedirect('missing_code_or_state');
   }
 
-  // 1. Validate state against cookie
+  // 1. Validate state and PKCE verifier from cookies
   const savedState = req.cookies.get('gmail_oauth_state')?.value;
   const codeVerifier = req.cookies.get('gmail_oauth_verifier')?.value;
 
   if (!savedState || savedState !== state) {
-    return NextResponse.redirect(
-      `${origin}/?view=settings&error=invalid_state`
-    );
+    console.error('OAuth state mismatch. Expected:', savedState ? 'present' : 'none');
+    return errorRedirect('invalid_state');
   }
 
   if (!codeVerifier) {
-    return NextResponse.redirect(
-      `${origin}/?view=settings&error=missing_pkce_verifier`
-    );
+    console.error('OAuth PKCE verifier cookie missing.');
+    return errorRedirect('missing_pkce_verifier');
   }
 
-  // 2. Parse state payload and verify user
+  // 2. Parse state payload and verify active session
   let statePayload: { userId: string };
   try {
     const jsonStr = Buffer.from(state, 'base64').toString('utf8');
     statePayload = JSON.parse(jsonStr);
   } catch {
-    return NextResponse.redirect(
-      `${origin}/?view=settings&error=corrupt_state`
-    );
+    console.error('OAuth state payload base64 decode failed.');
+    return errorRedirect('corrupt_state');
   }
 
   const serverClient = createServerClient();
   const { data: { user }, error: authError } = await serverClient.auth.getUser();
 
   if (authError || !user || user.id !== statePayload.userId) {
-    return NextResponse.redirect(
-      `${origin}/login?error=session_mismatch`
-    );
+    console.error('OAuth user session mismatch.');
+    return NextResponse.redirect(`${origin}/login?error=session_mismatch`);
   }
 
   const clientId = process.env.GOOGLE_CLIENT_ID;
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
 
   if (!clientId || !clientSecret || clientId.includes('placeholder')) {
-    return NextResponse.redirect(
-      `${origin}/?view=settings&error=missing_google_credentials`
-    );
+    console.error('Missing Google OAuth credentials in environment.');
+    return errorRedirect('missing_google_credentials');
   }
 
   const redirectUri = `${origin}/api/auth/callback`;
@@ -91,10 +87,8 @@ export async function GET(req: NextRequest) {
 
   if (!tokenRes.ok) {
     const errText = await tokenRes.text();
-    console.error('Google token exchange error:', errText);
-    return NextResponse.redirect(
-      `${origin}/?view=settings&error=token_exchange_failed`
-    );
+    console.error('Google token exchange error (HTTP ' + tokenRes.status + '):', errText);
+    return errorRedirect('token_exchange_failed');
   }
 
   const tokenData = await tokenRes.json();
@@ -102,9 +96,8 @@ export async function GET(req: NextRequest) {
   const refreshToken = tokenData.refresh_token;
 
   if (!accessToken) {
-    return NextResponse.redirect(
-      `${origin}/?view=settings&error=no_access_token`
-    );
+    console.error('Google token exchange did not return access_token');
+    return errorRedirect('no_access_token');
   }
 
   // 4. Fetch the connected Google account's email address
@@ -113,48 +106,59 @@ export async function GET(req: NextRequest) {
   });
 
   if (!userInfoRes.ok) {
-    return NextResponse.redirect(
-      `${origin}/?view=settings&error=failed_fetching_google_profile`
-    );
+    console.error('Failed fetching Google profile (HTTP ' + userInfoRes.status + ')');
+    return errorRedirect('failed_fetching_google_profile');
   }
 
   const userInfo = await userInfoRes.json();
   const googleEmail = (userInfo.email || '').trim().toLowerCase();
 
   if (!googleEmail) {
-    return NextResponse.redirect(
-      `${origin}/?view=settings&error=empty_google_email`
-    );
+    console.error('Google profile contained empty email');
+    return errorRedirect('empty_google_email');
   }
 
-  // 5. Encrypt refresh token (if present)
+  // 5. Encrypt refresh token (AES-256-GCM)
   const adminClient = createAdminClient();
   const nowIso = new Date().toISOString();
 
-  // If Google did not return a new refresh token (user already consented previously),
-  // retain existing encrypted token
   let encryptedRefreshToken: string | null = null;
   if (refreshToken) {
     try {
       encryptedRefreshToken = encryptToken(refreshToken);
     } catch (err: any) {
-      console.error('Failed encrypting refresh token:', err);
-      return NextResponse.redirect(
-        `${origin}/?view=settings&error=encryption_failed`
-      );
+      console.error('Failed encrypting refresh token:', err?.message);
+      return errorRedirect('encryption_failed');
     }
   }
 
-  // Check if account already exists for this user
-  const { data: existingAcc } = await adminClient
+  // 6. Upsert on owner_user_id in gmail_accounts
+  // If an existing row belongs to this user, update it.
+  // Also clean up any unlinked row with the same email to avoid unique constraint conflict.
+  const { data: existingUserAcc } = await adminClient
     .from('gmail_accounts')
-    .select('id, encrypted_refresh_token')
+    .select('id, encrypted_refresh_token, email')
     .eq('owner_user_id', user.id)
     .maybeSingle();
 
-  const finalRefreshToken = encryptedRefreshToken || existingAcc?.encrypted_refresh_token || null;
+  // If there is another row with googleEmail that does NOT belong to user.id, delete or reassign it
+  const { data: conflictAcc } = await adminClient
+    .from('gmail_accounts')
+    .select('id, owner_user_id')
+    .eq('email', googleEmail)
+    .neq('owner_user_id', user.id)
+    .maybeSingle();
 
-  if (existingAcc) {
+  if (conflictAcc) {
+    await adminClient
+      .from('gmail_accounts')
+      .delete()
+      .eq('id', conflictAcc.id);
+  }
+
+  const finalRefreshToken = encryptedRefreshToken || existingUserAcc?.encrypted_refresh_token || null;
+
+  if (existingUserAcc) {
     await adminClient
       .from('gmail_accounts')
       .update({
@@ -165,7 +169,7 @@ export async function GET(req: NextRequest) {
         pause_reason: null,
         updated_at: nowIso,
       })
-      .eq('id', existingAcc.id);
+      .eq('id', existingUserAcc.id);
   } else {
     await adminClient.from('gmail_accounts').insert({
       owner_user_id: user.id,
@@ -179,28 +183,33 @@ export async function GET(req: NextRequest) {
     });
   }
 
-  // Update connected_gmail in team_members
-  await adminClient
-    .from('team_members')
-    .update({
-      connected_gmail: googleEmail,
-      updated_at: nowIso,
-    })
-    .eq('id', user.id);
+  // Safely update connected_gmail in team_members if column exists
+  try {
+    await adminClient
+      .from('team_members')
+      .update({
+        connected_gmail: googleEmail,
+        updated_at: nowIso,
+      })
+      .eq('id', user.id);
+  } catch (err) {
+    // Non-fatal if column is being added
+  }
 
-  // Log in audit_log
+  // Write audit log
   await adminClient.from('audit_log').insert({
     user_id: user.id,
     action: 'mailbox.connect_gmail_oauth',
+    target: googleEmail,
     metadata: {
       email: googleEmail,
       hasRefreshToken: !!finalRefreshToken,
     },
   });
 
-  // 6. Clear oauth cookies and redirect with success
+  // 7. Clear oauth cookies and redirect to /settings?connected=1
   const redirectResponse = NextResponse.redirect(
-    `${origin}/?view=settings&success=gmail_connected&email=${encodeURIComponent(googleEmail)}`
+    `${origin}/settings?connected=1&email=${encodeURIComponent(googleEmail)}`
   );
 
   redirectResponse.cookies.set('gmail_oauth_state', '', { path: '/', maxAge: 0 });

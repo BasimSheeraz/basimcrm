@@ -3,6 +3,41 @@
 import { z } from 'zod';
 import { createClient as createServerClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { runGmailSync, SyncResult } from '@/lib/sync-engine';
+
+export async function syncCurrentMailboxAction(): Promise<{
+  success: boolean;
+  newMessages: number;
+  error?: string;
+  details?: any;
+}> {
+  const serverClient = createServerClient();
+  const { data: { user } } = await serverClient.auth.getUser();
+
+  if (!user) {
+    return { success: false, newMessages: 0, error: 'Unauthorized: active session required' };
+  }
+
+  try {
+    const res: SyncResult = await runGmailSync({ userId: user.id });
+    const hasError = res.results.some(r => r.status === 'error');
+    const firstErr = res.results.find(r => r.status === 'error')?.error;
+
+    return {
+      success: !hasError || res.totalNewMessages > 0,
+      newMessages: res.totalNewMessages,
+      error: hasError ? firstErr : undefined,
+      details: res.results,
+    };
+  } catch (err: any) {
+    console.error('syncCurrentMailboxAction failed:', err?.message);
+    return {
+      success: false,
+      newMessages: 0,
+      error: err?.message || 'Sync failed',
+    };
+  }
+}
 
 const syncSettingsSchema = z.object({
   backfillDays: z.union([z.literal(30), z.literal(60), z.literal(90)]),

@@ -41,6 +41,18 @@ export default function Home() {
 
   const unreadCount = threads.filter(t => t.unread && !t.archived).length;
 
+  React.useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const view = params.get('view');
+      const connected = params.get('connected');
+      const error = params.get('error');
+      if (view === 'settings' || connected === '1' || error) {
+        setActiveView('settings');
+      }
+    }
+  }, [setActiveView]);
+
   const handleOpenCompose = () => {
     setComposeInitialTo(undefined);
     setIsComposeOpen(true);

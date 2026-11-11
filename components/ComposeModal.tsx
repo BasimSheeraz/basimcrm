@@ -2,11 +2,11 @@
 
 import React, { useState, useEffect } from 'react';
 import { useApp } from '@/lib/store';
-import { X, Send, AlertTriangle, ShieldAlert, ExternalLink, StickyNote, Sparkles, UserCheck, Globe } from 'lucide-react';
+import { X, Send, AlertTriangle, ShieldAlert, ExternalLink, StickyNote, Sparkles, UserCheck, Globe, Link2 } from 'lucide-react';
 import { lintEmailDeliverability, calculateWarmupDailyCap } from '@/lib/deliverability';
 import { interpolateSnippetVariables } from '@/lib/template';
 import { normalizeEmail } from '@/lib/prospect-normalization';
-import { Prospect } from '@/types';
+import { Prospect, GmailAccountStatus } from '@/types';
 import { getProspectForContactOrEmailAction } from '@/lib/actions/prospects';
 
 interface ComposeModalProps {
@@ -40,17 +40,20 @@ export function ComposeModal({ isOpen, onClose, initialTo }: ComposeModalProps) 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [linkedProspect, setLinkedProspect] = useState<Prospect | null>(null);
 
+  const userAccount = gmailAccounts.find(a => a.ownerUserId === currentUser.id);
+  const hasConnectedGmail = Boolean(userAccount && !userAccount.email.endsWith('@ourteam.io') && userAccount.status !== 'needs_reconnect');
+
   const defaultAccount = {
     id: '',
     ownerUserId: currentUser.id,
-    email: currentUser.email || 'user@ourteam.io',
-    status: 'active' as const,
+    email: userAccount?.email || currentUser.email || 'user@ourteam.io',
+    status: (userAccount?.status || 'active') as GmailAccountStatus,
     dailyCap: 5,
     sentToday: 0,
     warmupStartedAt: new Date().toISOString(),
     warmupOverride: false,
   };
-  const senderAccount = gmailAccounts.find(a => a.ownerUserId === currentUser.id) || gmailAccounts[0] || defaultAccount;
+  const senderAccount = userAccount || gmailAccounts[0] || defaultAccount;
   const warmup = calculateWarmupDailyCap(senderAccount.warmupStartedAt, senderAccount.dailyCap, senderAccount.warmupOverride);
   const isCapReached = (senderAccount.sentToday || 0) >= warmup.allowedCap;
 
@@ -494,10 +497,16 @@ export function ComposeModal({ isOpen, onClose, initialTo }: ComposeModalProps) 
             <div className="pt-3 border-t border-white/[0.08] flex items-center justify-between">
               <div className="flex items-center space-x-2 text-xs text-white/50">
                 <span className="text-white/40">From:</span>
-                <span className="font-semibold text-white/95 flex items-center gap-1.5">
-                  <span className={`w-2 h-2 rounded-full ${currentUser.color}`} />
-                  {currentUser.name} ({senderAccount.email})
-                </span>
+                {hasConnectedGmail ? (
+                  <span className="font-semibold text-white/95 flex items-center gap-1.5">
+                    <span className={`w-2 h-2 rounded-full ${currentUser.color}`} />
+                    {currentUser.name} ({senderAccount.email})
+                  </span>
+                ) : (
+                  <span className="font-medium text-amber-400 flex items-center gap-1.5">
+                    No connected Gmail mailbox
+                  </span>
+                )}
               </div>
 
               <div className="flex items-center space-x-2">
@@ -508,14 +517,24 @@ export function ComposeModal({ isOpen, onClose, initialTo }: ComposeModalProps) 
                 >
                   Cancel
                 </button>
-                <button
-                  type="submit"
-                  disabled={isSubmitting || isDnc || isCapReached || (isOwnedByOther && !adminOverride)}
-                  className="flex items-center space-x-2 apple-primary-btn px-4 py-2 rounded-xl text-xs font-semibold transition-all shadow-sm active:scale-95 disabled:opacity-40 cursor-pointer"
-                >
-                  <Send className="w-3.5 h-3.5" strokeWidth={2} />
-                  <span>{isSubmitting ? 'Sending...' : 'Queue Outreach (45-120s)'}</span>
-                </button>
+                {!hasConnectedGmail ? (
+                  <a
+                    href="/api/auth/google"
+                    className="flex items-center space-x-1.5 apple-primary-btn px-4 py-2 rounded-xl text-xs font-semibold transition-all shadow-sm active:scale-95 cursor-pointer"
+                  >
+                    <Link2 className="w-3.5 h-3.5" />
+                    <span>Connect Gmail to Send</span>
+                  </a>
+                ) : (
+                  <button
+                    type="submit"
+                    disabled={isSubmitting || isDnc || isCapReached || (isOwnedByOther && !adminOverride)}
+                    className="flex items-center space-x-2 apple-primary-btn px-4 py-2 rounded-xl text-xs font-semibold transition-all shadow-sm active:scale-95 disabled:opacity-40 cursor-pointer"
+                  >
+                    <Send className="w-3.5 h-3.5" strokeWidth={2} />
+                    <span>{isSubmitting ? 'Sending via Gmail...' : 'Send Outreach'}</span>
+                  </button>
+                )}
               </div>
             </div>
           </form>

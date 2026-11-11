@@ -116,9 +116,10 @@ export function SettingsView({ onOpenDnc }: SettingsViewProps) {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
       const success = params.get('success');
+      const connected = params.get('connected');
       const error = params.get('error');
       const email = params.get('email');
-      if (success === 'gmail_connected') {
+      if (success === 'gmail_connected' || connected === '1') {
         setOauthStatus({
           type: 'success',
           message: `Successfully connected personal Gmail mailbox${email ? ` (${email})` : ''}!`,

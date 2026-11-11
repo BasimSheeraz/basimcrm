@@ -35,14 +35,29 @@ export async function getGmailAccountsAction(): Promise<GmailAccount[]> {
       warmup_started_at,
       warmup_override,
       pause_reason,
-      team_members:owner_user_id (name, initials, color)
+      team_members:owner_user_id (name, avatar_color)
     `)
     .order('created_at', { ascending: true });
 
-  if (error || !accounts) return [];
+  if (error || !accounts) {
+    if (error) console.error('getGmailAccountsAction query error:', error.message);
+    return [];
+  }
 
   return accounts.map((acc: any) => {
     const warmup = calculateWarmupDailyCap(acc.warmup_started_at, acc.daily_cap, acc.warmup_override);
+    const memberName = acc.team_members?.name || 'Teammate';
+    const initials = memberName
+      .split(' ')
+      .map((p: string) => p[0])
+      .filter(Boolean)
+      .join('')
+      .slice(0, 2)
+      .toUpperCase() || 'TM';
+    const colorClass = acc.team_members?.avatar_color
+      ? `bg-[${acc.team_members.avatar_color}]`
+      : 'bg-blue-600';
+
     return {
       id: acc.id,
       ownerUserId: acc.owner_user_id,
@@ -56,9 +71,9 @@ export async function getGmailAccountsAction(): Promise<GmailAccount[]> {
       warmupStartedAt: acc.warmup_started_at,
       warmupOverride: acc.warmup_override,
       pauseReason: acc.pause_reason,
-      ownerName: acc.team_members?.name || 'Teammate',
-      ownerInitials: acc.team_members?.initials || 'TM',
-      ownerColor: acc.team_members?.color || 'bg-blue-600',
+      ownerName: memberName,
+      ownerInitials: initials,
+      ownerColor: colorClass,
       warmupLimit: warmup.allowedCap,
       warmupWeek: warmup.weekNumber,
     };

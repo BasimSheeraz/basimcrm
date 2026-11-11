@@ -22,7 +22,8 @@ import {
   CornerUpLeft,
   Users,
   ShieldCheck,
-  MailCheck
+  MailCheck,
+  Link2
 } from 'lucide-react';
 import { PipelineStatus, AttachmentMetadata } from '@/types';
 import { autosaveDraftAction, getDraftForThreadAction, deleteDraftAction } from '@/lib/actions/drafts';
@@ -225,9 +226,12 @@ export function InboxView() {
     warmupOverride: false,
   };
 
+  const userAccount = gmailAccounts.find(a => a.ownerUserId === currentUser.id);
+  const hasConnectedGmail = Boolean(userAccount && !userAccount.email.endsWith('@ourteam.io') && userAccount.status !== 'needs_reconnect');
+
   // Account that owns the selected thread
   const threadAccount = gmailAccounts.find(a => a.id === selectedThread?.accountId) || 
-    gmailAccounts.find(a => a.ownerUserId === currentUser.id) || 
+    userAccount || 
     gmailAccounts[0] ||
     defaultAccount;
 
@@ -1006,20 +1010,36 @@ export function InboxView() {
                         </button>
 
                         {/* Sending As & Cap Indicator */}
-                        <span className="text-[10px] text-white/40 font-mono truncate hidden sm:inline">
-                          Sending as {threadAccount.email} • Sent: {threadAccount.sentToday}/{warmup.allowedCap} PKT
-                        </span>
+                        {hasConnectedGmail ? (
+                          <span className="text-[10px] text-white/40 font-mono truncate hidden sm:inline">
+                            Sending as {threadAccount.email} • Sent: {threadAccount.sentToday}/{warmup.allowedCap} PKT
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-amber-400 font-mono truncate hidden sm:inline">
+                            No connected Gmail mailbox
+                          </span>
+                        )}
                       </div>
 
-                      {/* Right: Large Blue Send Button */}
-                      <button
-                        type="submit"
-                        disabled={!replyText.trim() || isSubmitting || isDnc}
-                        className="flex items-center space-x-1.5 apple-primary-btn px-3 sm:px-4 py-1.5 rounded-xl text-[12.5px] font-semibold transition-all shadow-sm active:scale-95 disabled:opacity-40 cursor-pointer shrink-0"
-                      >
-                        <Send className="w-3.5 h-3.5" strokeWidth={2} />
-                        <span>{isSubmitting ? 'Sending...' : 'Send'}</span>
-                      </button>
+                      {/* Right: Send Button or Connect Gmail */}
+                      {!hasConnectedGmail ? (
+                        <a
+                          href="/api/auth/google"
+                          className="flex items-center space-x-1.5 apple-primary-btn px-3 sm:px-4 py-1.5 rounded-xl text-[12.5px] font-semibold transition-all shadow-sm active:scale-95 cursor-pointer shrink-0"
+                        >
+                          <Link2 className="w-3.5 h-3.5" />
+                          <span>Connect Gmail</span>
+                        </a>
+                      ) : (
+                        <button
+                          type="submit"
+                          disabled={!replyText.trim() || isSubmitting || isDnc}
+                          className="flex items-center space-x-1.5 apple-primary-btn px-3 sm:px-4 py-1.5 rounded-xl text-[12.5px] font-semibold transition-all shadow-sm active:scale-95 disabled:opacity-40 cursor-pointer shrink-0"
+                        >
+                          <Send className="w-3.5 h-3.5" strokeWidth={2} />
+                          <span>{isSubmitting ? 'Sending...' : 'Send'}</span>
+                        </button>
+                      )}
                     </div>
                   </form>
                 </div>

@@ -2,8 +2,8 @@
 
 import { createClient as createServerClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { calculateNextScheduledSendTime, getPktTime } from '@/lib/deliverability';
 import { normalizeEmail } from '@/lib/prospect-normalization';
+import { sendGmailMessageViaApi } from '@/lib/gmail';
 
 export interface SendMessageParams {
   accountId: string;
@@ -26,6 +26,7 @@ export interface SendMessageResult {
   isQueued?: boolean;
   scheduledFor?: string;
   error?: string;
+  gmailMessageId?: string;
   collisionWarning?: {
     ownerName: string;
     ownerEmail: string;
@@ -56,41 +57,31 @@ export async function sendOutreachOrReplyAction(
   }
 
   // 2. Mailbox Ownership Authorization Check
-  // CRITICAL SECURITY CONSTRAINT: Nobody can send from another teammate's mailbox!
+  // Nobody can send from another teammate's mailbox!
   let { data: account } = await adminClient
     .from('gmail_accounts')
-    .select('id, owner_user_id, email, status, daily_cap, warmup_started_at, warmup_override')
+    .select('id, owner_user_id, email, status, encrypted_refresh_token, daily_cap, warmup_started_at, warmup_override')
     .eq('id', params.accountId)
     .maybeSingle();
 
-  if (!account && params.accountId === currentMember.id) {
+  if (!account) {
+    // Fallback: look up by current user ID
     const { data: ownAcc } = await adminClient
       .from('gmail_accounts')
-      .select('id, owner_user_id, email, status, daily_cap, warmup_started_at, warmup_override')
+      .select('id, owner_user_id, email, status, encrypted_refresh_token, daily_cap, warmup_started_at, warmup_override')
       .eq('owner_user_id', currentMember.id)
       .maybeSingle();
 
     if (ownAcc) {
       account = ownAcc;
-    } else {
-      const { data: createdAcc } = await adminClient
-        .from('gmail_accounts')
-        .insert({
-          owner_user_id: currentMember.id,
-          email: currentMember.email,
-          status: 'active',
-          daily_cap: 15,
-          warmup_started_at: new Date().toISOString(),
-          warmup_override: true,
-        })
-        .select('id, owner_user_id, email, status, daily_cap, warmup_started_at, warmup_override')
-        .single();
-      account = createdAcc;
     }
   }
 
   if (!account) {
-    return { success: false, error: 'Mailbox account not found.' };
+    return { 
+      success: false, 
+      error: 'No connected Gmail mailbox found. Please connect your Gmail in Settings before sending.' 
+    };
   }
 
   if (account.owner_user_id !== currentMember.id) {
@@ -101,10 +92,11 @@ export async function sendOutreachOrReplyAction(
   }
 
   if (account.status === 'paused') {
-    return { success: false, error: 'Your mailbox is currently paused due to health/bounce thresholds.' };
+    return { success: false, error: 'Your mailbox is currently paused. Please review Settings.' };
   }
-  if (account.status === 'needs_reconnect') {
-    return { success: false, error: 'Your mailbox requires reconnection with Google OAuth.' };
+
+  if (account.status === 'needs_reconnect' || !account.encrypted_refresh_token) {
+    return { success: false, error: 'Your mailbox requires reconnection with Google OAuth. Go to Settings to reconnect.' };
   }
 
   const cleanRecipientEmail = params.toEmail.trim().toLowerCase();
@@ -125,7 +117,6 @@ export async function sendOutreachOrReplyAction(
   }
 
   // 4. Contact Collision & Ownership Protection
-  // One contact belongs to ONE sender at a time across all mailboxes
   const { data: existingContact } = await adminClient
     .from('contacts')
     .select(`
@@ -137,7 +128,7 @@ export async function sendOutreachOrReplyAction(
       team_members:owner_user_id (name, email)
     `)
     .eq('email', cleanRecipientEmail)
-    .single();
+    .maybeSingle();
 
   const contactOwnerId = existingContact?.owner_user_id || existingContact?.last_contacted_by_user_id;
 
@@ -169,7 +160,25 @@ export async function sendOutreachOrReplyAction(
     });
   }
 
-  // 5. Safe Sending Cap Enforcement (PKT Time)
+  // 5. Idempotency Check (Double-click protection)
+  if (params.idempotencyKey) {
+    const { data: existingSend } = await adminClient
+      .from('audit_log')
+      .select('id, metadata')
+      .eq('action', params.isReply ? 'email.sent_reply' : 'email.sent_outreach')
+      .contains('metadata', { idempotencyKey: params.idempotencyKey })
+      .maybeSingle();
+
+    if (existingSend) {
+      return { 
+        success: true, 
+        isQueued: false, 
+        gmailMessageId: (existingSend.metadata as any)?.gmailMessageId 
+      };
+    }
+  }
+
+  // 6. Safe Sending Cap Enforcement (PKT Time)
   const isReply = !!params.isReply;
   const { data: sendValidation, error: sendValError } = await adminClient.rpc('record_account_send', {
     p_account_id: account.id,
@@ -183,10 +192,63 @@ export async function sendOutreachOrReplyAction(
     return { success: false, error: errorMsg };
   }
 
-  // 6. Ensure Contact exists or is created, and link Prospect if present
+  // 7. Resolve thread context for replies
+  let existingThread: any = null;
+  let inReplyToMessageId: string | null = null;
+  let activeThreadId = params.threadId || null;
+
+  if (isReply && activeThreadId) {
+    const { data: th } = await adminClient
+      .from('threads')
+      .select('id, gmail_thread_id, subject')
+      .eq('id', activeThreadId)
+      .maybeSingle();
+
+    existingThread = th;
+
+    if (existingThread) {
+      // Find latest message in thread for In-Reply-To and References
+      const { data: lastMsg } = await adminClient
+        .from('messages')
+        .select('gmail_message_id, rfc822_message_id')
+        .eq('thread_id', activeThreadId)
+        .order('sent_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      inReplyToMessageId = lastMsg?.rfc822_message_id || lastMsg?.gmail_message_id || null;
+    }
+  }
+
+  // 8. REAL GMAIL API SEND VIA users.messages.send
+  let sendResult: { gmailMessageId: string; gmailThreadId: string };
+  try {
+    sendResult = await sendGmailMessageViaApi({
+      accountId: account.id,
+      fromEmail: account.email,
+      fromName: currentMember.name,
+      toEmail: cleanRecipientEmail,
+      ccEmail: params.ccEmail || null,
+      bccEmail: params.bccEmail || null,
+      subject: params.subject,
+      bodyText: params.body,
+      gmailThreadId: existingThread?.gmail_thread_id || null,
+      inReplyToMessageId: inReplyToMessageId,
+      referencesMessageId: inReplyToMessageId,
+    });
+  } catch (err: any) {
+    console.error('Gmail send error in sendOutreachOrReplyAction:', err?.message);
+    return {
+      success: false,
+      error: err?.message || 'Failed to send message via Gmail API. Check your mailbox status.',
+    };
+  }
+
+  // 9. ONLY AFTER GMAIL CONFIRMS: Update DB tables
   const nowIso = new Date().toISOString();
   let linkedContactId = existingContact?.id || null;
 
+  // Create or update Contact
   if (!linkedContactId) {
     const { data: createdContact } = await adminClient
       .from('contacts')
@@ -221,14 +283,13 @@ export async function sendOutreachOrReplyAction(
       .eq('id', linkedContactId);
   }
 
-  // Create or update Thread & Message record so it appears in Sent Outreach & Contact Timeline
-  let activeThreadId = params.threadId || null;
-  if (!activeThreadId && !isReply) {
+  // Create or update Thread
+  if (!activeThreadId) {
     const { data: createdThread } = await adminClient
       .from('threads')
       .insert({
         account_id: account.id,
-        gmail_thread_id: `local-thread-${Date.now()}`,
+        gmail_thread_id: sendResult.gmailThreadId,
         subject: params.subject,
         snippet: params.body.slice(0, 140),
         contact_id: linkedContactId,
@@ -248,14 +309,26 @@ export async function sendOutreachOrReplyAction(
     if (createdThread?.id) {
       activeThreadId = createdThread.id;
     }
+  } else {
+    await adminClient
+      .from('threads')
+      .update({
+        gmail_thread_id: sendResult.gmailThreadId,
+        snippet: params.body.slice(0, 140),
+        last_message_at: nowIso,
+        unread: false,
+        updated_at: nowIso,
+      })
+      .eq('id', activeThreadId);
   }
 
+  // Insert Sent Message
   if (activeThreadId) {
     await adminClient.from('messages').insert({
       account_id: account.id,
       thread_id: activeThreadId,
       contact_id: linkedContactId,
-      gmail_message_id: `local-msg-${Date.now()}`,
+      gmail_message_id: sendResult.gmailMessageId,
       direction: 'outbound',
       from_email: account.email,
       from_name: currentMember.name,
@@ -269,7 +342,7 @@ export async function sendOutreachOrReplyAction(
     });
   }
 
-  // Update matching Prospect status to 'contacted', set contacted_at and contact_id
+  // 10. Update matching Prospect status to 'contacted'
   const normalizedRecipient = normalizeEmail(cleanRecipientEmail);
   let matchedProspect: any = null;
 
@@ -318,54 +391,23 @@ export async function sendOutreachOrReplyAction(
     }
   }
 
-  // 7. Immediate Send (Reply) vs Queued Send (New Outreach with 45-120s delay)
-  if (isReply) {
-    // Replies are dispatched immediately
-    await adminClient.from('audit_log').insert({
-      user_id: user.id,
-      action: 'email.sent_reply',
-      metadata: {
-        accountId: account.id,
-        toEmail: cleanRecipientEmail,
-        threadId: params.threadId,
-        idempotencyKey: params.idempotencyKey
-      }
-    });
-
-    return { success: true, isQueued: false };
-  }
-
-  // Outbound New Outreach: Calculate queued slot within PKT business hours
-  const scheduledTime = calculateNextScheduledSendTime();
-
-  await adminClient.from('outbound_queue').insert({
-    account_id: account.id,
-    user_id: currentMember.id,
-    contact_id: linkedContactId,
-    to_email: cleanRecipientEmail,
-    cc_email: params.ccEmail || null,
-    bcc_email: params.bccEmail || null,
-    subject: params.subject,
-    body: params.body,
-    scheduled_for: scheduledTime.toISOString(),
-    status: 'queued',
-    idempotency_key: params.idempotencyKey,
-  });
-
+  // 11. Write Audit Log
   await adminClient.from('audit_log').insert({
     user_id: user.id,
-    action: 'email.queued_outreach',
+    action: isReply ? 'email.sent_reply' : 'email.sent_outreach',
     metadata: {
       accountId: account.id,
+      fromEmail: account.email,
       toEmail: cleanRecipientEmail,
-      scheduledFor: scheduledTime.toISOString(),
-      idempotencyKey: params.idempotencyKey
-    }
+      gmailMessageId: sendResult.gmailMessageId,
+      gmailThreadId: sendResult.gmailThreadId,
+      idempotencyKey: params.idempotencyKey,
+    },
   });
 
   return {
     success: true,
-    isQueued: true,
-    scheduledFor: scheduledTime.toISOString()
+    isQueued: false,
+    gmailMessageId: sendResult.gmailMessageId,
   };
 }

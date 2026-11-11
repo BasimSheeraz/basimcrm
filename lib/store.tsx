@@ -29,6 +29,7 @@ import {
   SearchResultThread 
 } from './actions/search';
 import { getGmailAccountsAction, updateDailyCapAction } from './actions/mailboxes';
+import { syncCurrentMailboxAction } from './actions/sync';
 import { getDoNotContactListAction, addToDoNotContactAction, removeFromDoNotContactAction } from './actions/do-not-contact';
 import { sendOutreachOrReplyAction } from './actions/sending';
 import { calculateWarmupDailyCap } from './deliverability';
@@ -103,7 +104,7 @@ interface AppContextType {
   addToDnc: (value: string, type: 'email' | 'domain', reason: string) => Promise<void>;
   removeFromDnc: (id: string) => Promise<void>;
   updateAccountCap: (accountId: string, newCap: number, warmupOverride?: boolean) => Promise<void>;
-  syncGmail: () => Promise<void>;
+  syncGmail: () => Promise<{ success: boolean; newMessages: number; error?: string }>;
   updateGmailConfig: (newConfig: Partial<GmailConfig>) => void;
   isSyncing: boolean;
   todayStats: TodayDashboardStats;
@@ -203,7 +204,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setIsAuthLoading(true);
     setAuthError(null);
 
-    // Watchdog: Max 3 seconds for loading, then show error state with retry
+    // Watchdog: Max 15 seconds for initial loading before failing gracefully
     const watchdogTimer = setTimeout(() => {
       setIsAuthLoading(prev => {
         if (prev) {
@@ -211,7 +212,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
         return false;
       });
-    }, 3000);
+    }, 15000);
 
     try {
       const supabase = createClient();
@@ -267,12 +268,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setCurrentUser(currUser);
       setAuthenticatedUser(currUser);
 
+      // Load team resources in parallel with individual error resilience
       const [teamList, accounts, contactList, dncList, searchRes] = await Promise.all([
-        getTeamMembersAction(),
-        getGmailAccountsAction(),
-        getContactsAction(),
-        getDoNotContactListAction(),
-        searchCrmThreadsAction('', 0, 30),
+        getTeamMembersAction().catch(() => []),
+        getGmailAccountsAction().catch(() => []),
+        getContactsAction().catch(() => []),
+        getDoNotContactListAction().catch(() => []),
+        searchCrmThreadsAction('', 0, 30).catch(() => ({ threads: [], hasMore: false, totalCount: 0 })),
       ]);
 
       setUsers(teamList);
@@ -280,9 +282,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setContacts(contactList);
       setDoNotContactList(dncList);
 
-      const mappedThreads = searchRes.threads.map(mapSearchThread);
+      const mappedThreads = (searchRes?.threads || []).map(mapSearchThread);
       setThreads(mappedThreads);
-      setHasMoreThreads(searchRes.hasMore);
+      setHasMoreThreads(searchRes?.hasMore || false);
       setThreadPage(0);
 
       if (mappedThreads.length > 0 && !selectedThreadId) {
@@ -884,15 +886,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     await updateDailyCapAction(accountId, newCap, warmupOverride);
   };
 
-  const syncGmail = async () => {
+  const syncGmail = async (): Promise<{ success: boolean; newMessages: number; error?: string }> => {
     setIsSyncing(true);
     try {
-      const res = await fetch('/api/sync', { credentials: 'same-origin' });
-      if (res.ok) {
-        await loadInitialData();
-      }
-    } catch (err) {
+      const res = await syncCurrentMailboxAction();
+      await loadInitialData();
+      return res;
+    } catch (err: any) {
       console.warn('Sync request failed:', err);
+      return { success: false, newMessages: 0, error: err?.message || 'Sync failed' };
     } finally {
       setIsSyncing(false);
     }

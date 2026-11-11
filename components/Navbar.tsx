@@ -16,10 +16,13 @@ import {
   ShieldAlert, 
   LogOut,
   Users,
-  AlertCircle
+  AlertCircle,
+  AlertTriangle,
+  Link2
 } from 'lucide-react';
 import { calculateWarmupDailyCap } from '@/lib/deliverability';
 import { formatLastSeen, getStatusDotClass, getStatusLabel } from '@/lib/presence';
+import { GmailAccountStatus } from '@/types';
 
 interface NavbarProps {
   onOpenCompose: () => void;
@@ -55,6 +58,7 @@ export function Navbar({
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [teamPopoverOpen, setTeamPopoverOpen] = useState(false);
+  const [syncResultToast, setSyncResultToast] = useState<{ success: boolean; message: string } | null>(null);
 
   const menuRef = useRef<HTMLDivElement>(null);
   const teamPopoverRef = useRef<HTMLDivElement>(null);
@@ -62,18 +66,40 @@ export function Navbar({
   const isAdmin = currentUser.role.includes('admin') || currentUser.systemRole === 'admin' || currentUser.name === 'Basim';
   const unreadCount = threads.filter(t => t.unread && !t.archived).length;
 
+  const userAccount = gmailAccounts.find(a => a.ownerUserId === currentUser.id);
+  const hasConnectedGmail = Boolean(userAccount && !userAccount.email.endsWith('@ourteam.io') && userAccount.status !== 'needs_reconnect');
+  const needsReconnect = userAccount?.status === 'needs_reconnect';
+
   const defaultAccount = {
     id: '',
     ownerUserId: currentUser.id,
-    email: currentUser.email || 'user@ourteam.io',
-    status: 'active' as const,
+    email: userAccount?.email || currentUser.email || 'user@ourteam.io',
+    status: (userAccount?.status || 'active') as GmailAccountStatus,
     dailyCap: 5,
     sentToday: 0,
     warmupStartedAt: new Date().toISOString(),
     warmupOverride: false,
   };
-  const myAccount = gmailAccounts.find(a => a.ownerUserId === currentUser.id) || gmailAccounts[0] || defaultAccount;
+  const myAccount = userAccount || gmailAccounts[0] || defaultAccount;
   const warmup = calculateWarmupDailyCap(myAccount.warmupStartedAt, myAccount.dailyCap, myAccount.warmupOverride);
+
+  const handleManualSync = async () => {
+    const res = await syncGmail();
+    if (res.success) {
+      setSyncResultToast({
+        success: true,
+        message: res.newMessages > 0 
+          ? `✓ Synced: ${res.newMessages} new message${res.newMessages > 1 ? 's' : ''}` 
+          : '✓ Mailbox is up to date',
+      });
+    } else {
+      setSyncResultToast({
+        success: false,
+        message: res.error || 'Sync failed',
+      });
+    }
+    setTimeout(() => setSyncResultToast(null), 4000);
+  };
 
   // Sort teammates by presence status (Online > Idle > Offline), then alphabetically
   const sortedTeammates = useMemo(() => {
@@ -155,29 +181,63 @@ export function Navbar({
           <span>Sent today: <strong className="text-white">{myAccount.sentToday}/{warmup.allowedCap}</strong> PKT</span>
         </div>
 
-        {/* Connected Personal Mailbox Pill */}
-        <button
-          onClick={onOpenSettings}
-          className="flex items-center space-x-1.5 px-2 py-1 rounded-full hover:bg-white/[0.08] transition-colors cursor-pointer group shrink-0"
-          title={`Connected Mailbox: ${myAccount.email} (${myAccount.status})`}
-        >
-          <span className={`w-2 h-2 rounded-full shrink-0 ${
-            myAccount.status === 'active' ? 'bg-[#30D158]' : myAccount.status === 'paused' ? 'bg-[#FF9F0A]' : 'bg-[#FF453A]'
-          }`} />
-          <span className="text-[11px] text-white/60 group-hover:text-white hidden lg:inline max-w-[130px] truncate font-mono">
-            {myAccount.email.split('@')[0]}
-          </span>
-        </button>
+        {/* Connected Personal Mailbox Pill / Reconnect Banner */}
+        {!isAuthLoading && (
+          needsReconnect ? (
+            <a
+              href="/api/auth/google"
+              className="flex items-center space-x-1.5 px-2.5 py-1 rounded-full bg-[#FF453A]/20 border border-[#FF453A]/40 text-[#FF453A] text-xs hover:bg-[#FF453A]/30 transition-all font-medium shrink-0 animate-in fade-in"
+              title="Google authorization expired or revoked. Click to reconnect your Gmail mailbox."
+            >
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              <span>Reconnect Gmail</span>
+            </a>
+          ) : !hasConnectedGmail ? (
+            <a
+              href="/api/auth/google"
+              className="flex items-center space-x-1.5 px-2.5 py-1 rounded-full bg-[#0A84FF]/20 border border-[#0A84FF]/40 text-[#0A84FF] text-xs hover:bg-[#0A84FF]/30 transition-all font-medium shrink-0 animate-in fade-in"
+              title="Connect your personal Gmail mailbox to send and sync outreach"
+            >
+              <Link2 className="w-3.5 h-3.5 shrink-0" />
+              <span>Connect Gmail</span>
+            </a>
+          ) : (
+            <button
+              onClick={onOpenSettings}
+              className="flex items-center space-x-1.5 px-2 py-1 rounded-full hover:bg-white/[0.08] transition-colors cursor-pointer group shrink-0"
+              title={`Connected Mailbox: ${myAccount.email} (${myAccount.status})`}
+            >
+              <span className={`w-2 h-2 rounded-full shrink-0 ${
+                myAccount.status === 'active' ? 'bg-[#30D158]' : myAccount.status === 'paused' ? 'bg-[#FF9F0A]' : 'bg-[#FF453A]'
+              }`} />
+              <span className="text-[11px] text-white/60 group-hover:text-white hidden lg:inline max-w-[130px] truncate font-mono">
+                {myAccount.email.split('@')[0]}
+              </span>
+            </button>
+          )
+        )}
 
-        {/* Sync Icon Button */}
-        <button
-          onClick={() => syncGmail()}
-          disabled={isSyncing}
-          className="w-7 h-7 rounded-full flex items-center justify-center text-white/60 hover:text-white hover:bg-white/[0.08] transition-colors disabled:opacity-50 cursor-pointer"
-          title="Sync all 3 personal Gmail mailboxes"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin text-[#0A84FF]' : ''}`} />
-        </button>
+        {/* Sync Now Button with Result Toast */}
+        <div className="relative">
+          <button
+            onClick={handleManualSync}
+            disabled={isSyncing}
+            className="flex items-center space-x-1.5 px-2.5 py-1 rounded-full bg-white/[0.05] hover:bg-white/[0.1] border border-white/10 text-[11px] text-white/80 hover:text-white transition-all disabled:opacity-50 cursor-pointer shrink-0"
+            title="Sync recent messages for your Gmail mailbox"
+          >
+            <RefreshCw className={`w-3 h-3 ${isSyncing ? 'animate-spin text-[#0A84FF]' : 'text-white/60'}`} />
+            <span className="hidden sm:inline font-medium">{isSyncing ? 'Syncing...' : 'Sync now'}</span>
+          </button>
+          {syncResultToast && (
+            <div className={`absolute top-full right-0 mt-2 px-3 py-1.5 rounded-xl border text-[11px] shadow-2xl z-50 whitespace-nowrap animate-in fade-in slide-in-from-top-1 ${
+              syncResultToast.success 
+                ? 'bg-[#12131C] border-[#30D158]/50 text-[#30D158]' 
+                : 'bg-[#12131C] border-[#FF453A]/50 text-[#FF453A]'
+            }`}>
+              {syncResultToast.message}
+            </div>
+          )}
+        </div>
 
         {/* Teammate Avatars with Real Presence Status Dots & Hover Cards */}
         <div className="hidden sm:flex items-center -space-x-1.5 pl-1 pr-0.5">
@@ -314,7 +374,7 @@ export function Navbar({
             <div className="w-6 h-6 rounded-full bg-white/20" />
             <div className="w-14 h-3 rounded bg-white/15 hidden sm:inline" />
           </div>
-        ) : authError ? (
+        ) : authError && !currentUser.id ? (
           <div className="flex items-center space-x-1.5 px-2.5 py-1 rounded-full bg-red-500/15 border border-red-500/30 text-red-300 text-xs">
             <AlertCircle className="w-3.5 h-3.5 shrink-0" />
             <span className="hidden sm:inline font-medium text-[11px]">Auth error</span>
