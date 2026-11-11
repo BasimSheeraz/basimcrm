@@ -110,6 +110,36 @@ export function SettingsView({ onOpenDnc }: SettingsViewProps) {
   // Account cap edit state (admin)
   const [editingCaps, setEditingCaps] = useState<Record<string, number>>({});
   const [capSaveStatus, setCapSaveStatus] = useState<string | null>(null);
+  const [oauthStatus, setOauthStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const success = params.get('success');
+      const error = params.get('error');
+      const email = params.get('email');
+      if (success === 'gmail_connected') {
+        setOauthStatus({
+          type: 'success',
+          message: `Successfully connected personal Gmail mailbox${email ? ` (${email})` : ''}!`,
+        });
+        window.history.replaceState({}, '', window.location.pathname);
+      } else if (error) {
+        if (error === 'missing_google_credentials') {
+          setOauthStatus({
+            type: 'error',
+            message: 'Google Cloud Credentials Required: Add your GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in Vercel Project Settings (or .env.local).',
+          });
+        } else {
+          setOauthStatus({
+            type: 'error',
+            message: `OAuth Error: ${decodeURIComponent(error)}`,
+          });
+        }
+        window.history.replaceState({}, '', window.location.pathname);
+      }
+    }
+  }, []);
 
   useEffect(() => {
     getDatabaseStorageStatsAction().then(setStorageStats).catch(() => {});
@@ -254,6 +284,25 @@ export function SettingsView({ onOpenDnc }: SettingsViewProps) {
         </p>
       </div>
 
+      {oauthStatus && (
+        <div className={`p-3.5 rounded-xl border text-xs flex items-center justify-between gap-2 animate-in fade-in ${
+          oauthStatus.type === 'success'
+            ? 'bg-[#30D158]/15 border-[#30D158]/30 text-[#30D158]'
+            : 'bg-[#FF9F0A]/15 border-[#FF9F0A]/35 text-[#FF9F0A]'
+        }`}>
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 shrink-0" />
+            <span>{oauthStatus.message}</span>
+          </div>
+          <button
+            onClick={() => setOauthStatus(null)}
+            className="text-white/40 hover:text-white text-xs px-2 py-0.5"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {capSaveStatus && (
         <div className="p-3 rounded-xl bg-[#30D158]/15 border border-[#30D158]/30 text-[#30D158] text-xs flex items-center gap-2 animate-in fade-in">
           <CheckCircle2 className="w-4 h-4 shrink-0" />
@@ -289,12 +338,12 @@ export function SettingsView({ onOpenDnc }: SettingsViewProps) {
 
           <button
             onClick={() => {
-              alert(`OAuth Flow: Connecting ${currentUser.name}'s personal Gmail account with scopes: gmail.modify, gmail.send. State and PKCE validated.`);
+              window.location.href = '/api/auth/google';
             }}
-            className="apple-primary-btn px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-sm active:scale-95"
+            className="apple-primary-btn px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-sm active:scale-95 cursor-pointer"
           >
             <RefreshCw className="w-3.5 h-3.5" />
-            <span>Reconnect Gmail</span>
+            <span>Connect Personal Gmail</span>
           </button>
         </div>
 
