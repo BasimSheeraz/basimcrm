@@ -173,12 +173,15 @@ export function buildRfc2822Raw(params: {
     lines.push(`Bcc: ${params.bccEmail.trim()}`);
   }
 
-  lines.push(`Subject: ${params.subject}`);
+  // Encode Subject with RFC 2047 Base64 to prevent header corruption and spam penalties
+  const encodedSubject = `=?UTF-8?B?${Buffer.from(params.subject, 'utf8').toString('base64')}?=`;
+  lines.push(`Subject: ${encodedSubject}`);
   lines.push(`Date: ${new Date().toUTCString()}`);
   lines.push(`MIME-Version: 1.0`);
 
-  const uniqueId = `<crm-${Date.now()}-${crypto.randomBytes(8).toString('hex')}@basimcrm.internal>`;
-  lines.push(`Message-ID: ${uniqueId}`);
+  // Note: Message-ID is intentionally omitted so Gmail API automatically generates
+  // its official, authentic DKIM-signed Message-ID (<...@mail.gmail.com>).
+  // A custom or synthetic domain Message-ID triggers heavy spam penalties in Google.
 
   if (params.inReplyToMessageId) {
     const cleanInReplyTo = params.inReplyToMessageId.startsWith('<') && params.inReplyToMessageId.endsWith('>')

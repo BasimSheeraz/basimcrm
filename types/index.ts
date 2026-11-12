@@ -337,9 +337,23 @@ export interface TodayDashboardStats {
   accounts: AccountTodayStats[];
 }
 
+export type SpamRiskLevel = 'low' | 'medium' | 'high';
+
 export interface DeliverabilityWarning {
-  type: 'link_count' | 'first_email_attachment' | 'spam_words';
+  type: 
+    | 'link_count' 
+    | 'first_email_attachment' 
+    | 'spam_words'
+    | 'unresolved_variables'
+    | 'subject_length'
+    | 'subject_trick'
+    | 'body_word_count'
+    | 'body_similarity'
+    | 'role_address'
+    | 'domain_typo'
+    | 'high_spam_risk';
   message: string;
+  severity?: 'warning' | 'blocking';
 }
 
 export type SocialPlatform =

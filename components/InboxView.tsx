@@ -35,6 +35,7 @@ import { lintEmailDeliverability, calculateWarmupDailyCap } from '@/lib/delivera
 
 export function InboxView() {
   const { 
+    activeView,
     threads, 
     messages, 
     contacts, 
@@ -382,6 +383,25 @@ export function InboxView() {
       }`}>
         {/* Sticky Search & Multi-Mailbox Filter Row */}
         <div className="p-3 border-b border-white/[0.08] bg-white/[0.02] dark:bg-black/10 backdrop-blur-xl sticky top-0 z-10 space-y-2.5">
+          {/* Header Title with View Pill */}
+          <div className="flex items-center justify-between pb-1 border-b border-white/[0.06]">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold text-white tracking-tight">
+                {activeView === 'sent' ? 'Sent Outreach' : 'Unified Inbox'}
+              </span>
+              <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
+                activeView === 'sent' 
+                  ? 'bg-[#30D158]/20 text-[#30D158] border border-[#30D158]/30' 
+                  : 'bg-[#0A84FF]/20 text-[#0A84FF] border border-[#0A84FF]/30'
+              }`}>
+                {filteredThreads.length} {filteredThreads.length === 1 ? 'thread' : 'threads'}
+              </span>
+            </div>
+            <span className="text-[10px] text-white/40">
+              {activeView === 'sent' ? 'Team Outreach' : 'Live Sync Active'}
+            </span>
+          </div>
+
           {/* Combined Inbox Toggle & Account Filter */}
           <div className="flex items-center justify-between gap-2">
             {/* Mine / Everyone Switch */}

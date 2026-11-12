@@ -182,9 +182,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // Convert SearchResultThread to Thread format
   const mapSearchThread = useCallback((st: SearchResultThread): Thread => {
+    const acc = gmailAccounts.find(a => a.ownerUserId === st.assignedToUserId);
     return {
       id: st.id,
-      accountId: '',
+      accountId: acc?.id || '',
       gmailThreadId: st.id,
       subject: st.subject || '(No Subject)',
       snippet: st.snippet || '',
@@ -196,7 +197,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       contactName: st.contactName,
       contactCompany: st.contactCompany,
     };
-  }, []);
+  }, [gmailAccounts]);
 
   // Fetch initial data from Supabase
   const loadInitialData = useCallback(async () => {

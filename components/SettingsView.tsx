@@ -22,7 +22,9 @@ import {
   Flame,
   ShieldAlert,
   Pause,
-  Play
+  Play,
+  Check,
+  Info
 } from 'lucide-react';
 import { 
   updateGmailSyncSettingsAction, 
@@ -356,17 +358,17 @@ export function SettingsView({ onOpenDnc }: SettingsViewProps) {
         </div>
       </div>
 
-      {/* SECTION 2: Admin Multi-Mailbox Overview (Admin Only) */}
+      {/* SECTION 2: Admin Multi-Mailbox Deliverability Overview (Admin Only) */}
       {isAdmin && (
         <div className="p-5 sm:p-6 rounded-2xl bg-white/[0.03] border border-white/10 space-y-4">
           <div className="flex items-center justify-between">
             <div>
               <div className="flex items-center gap-2">
                 <Shield className="w-4 h-4 text-purple-400" />
-                <h2 className="text-sm font-bold text-white/95">Team Mailboxes Status & Warm-up (Admin Only)</h2>
+                <h2 className="text-sm font-bold text-white/95">Team Mailboxes Deliverability & Warm-up (Admin Only)</h2>
               </div>
               <p className="text-xs text-white/50 mt-0.5">
-                Monitor all 3 personal Gmail mailboxes, adjust daily caps, and manage warm-up schedules. Tokens are encrypted and never readable.
+                Monitor team personal Gmail mailboxes, warm-up progress, bounce rates, daily send caps, and deliverability health.
               </p>
             </div>
           </div>
@@ -375,6 +377,16 @@ export function SettingsView({ onOpenDnc }: SettingsViewProps) {
             {gmailAccounts.map(acc => {
               const warmupInfo = calculateWarmupDailyCap(acc.warmupStartedAt, acc.dailyCap, acc.warmupOverride);
               const currentEditCap = editingCaps[acc.id] ?? acc.dailyCap;
+              const connectedDateStr = acc.connectedAt 
+                ? new Date(acc.connectedAt).toLocaleDateString() 
+                : (acc.warmupStartedAt ? new Date(acc.warmupStartedAt).toLocaleDateString() : 'Active');
+              const daysActive = Math.max(1, Math.floor((Date.now() - new Date(acc.warmupStartedAt || Date.now()).getTime()) / (1000 * 60 * 60 * 24)));
+              const bounceRate = (acc.bouncesToday ?? 0) > 0 && (acc.sentToday ?? 0) > 0 
+                ? (((acc.bouncesToday ?? 0) / acc.sentToday) * 100).toFixed(1) + '%' 
+                : '0.0%';
+              const replyRate = (acc.repliesToday ?? 0) > 0 && (acc.sentToday ?? 0) > 0 
+                ? (((acc.repliesToday ?? 0) / acc.sentToday) * 100).toFixed(1) + '%' 
+                : '0.0%';
 
               return (
                 <div key={acc.id} className="p-4 rounded-xl bg-white/[0.02] border border-white/10 space-y-3">
@@ -391,23 +403,35 @@ export function SettingsView({ onOpenDnc }: SettingsViewProps) {
 
                     <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
                       acc.status === 'active' 
-                        ? 'bg-[#30D158]/15 text-[#30D158] border border-[#30D158]/25' 
+                        ? 'bg-[#30D158]/15 text-[#30D158] border border-[#30D158]/30' 
                         : acc.status === 'paused'
                         ? 'bg-[#FF9F0A]/20 text-[#FF9F0A] border border-[#FF9F0A]/30'
                         : 'bg-[#FF453A]/20 text-[#FF453A] border border-[#FF453A]/30'
                     }`}>
-                      {acc.status}
+                      {acc.status === 'active' ? 'Active' : acc.status === 'paused' ? 'Paused' : 'Needs Reconnect'}
                     </span>
                   </div>
 
-                  <div className="p-2.5 rounded-lg bg-black/20 text-[11px] space-y-1 text-white/60">
-                    <div className="flex justify-between">
-                      <span>Warm-up:</span>
-                      <span className="font-semibold text-white/80">Week {warmupInfo.weekNumber} ({warmupInfo.allowedCap}/day)</span>
+                  <div className="p-2.5 rounded-lg bg-black/25 text-[11px] space-y-1.5 text-white/60">
+                    <div className="flex justify-between items-center">
+                      <span>Connected Date:</span>
+                      <span className="font-mono text-white/80">{connectedDateStr}</span>
                     </div>
-                    <div className="flex justify-between">
-                      <span>Sent Today:</span>
-                      <span className="font-mono text-white/80">{acc.sentToday} sends</span>
+                    <div className="flex justify-between items-center">
+                      <span>Warm-up Active:</span>
+                      <span className="font-semibold text-white/85">Week {warmupInfo.weekNumber} ({daysActive} days)</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span>Today's Sends / Cap:</span>
+                      <span className="font-mono text-white/90 font-semibold">{acc.sentToday} / {warmupInfo.allowedCap}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span>Bounce Rate:</span>
+                      <span className="font-mono text-white/80">{bounceRate} <span className="text-[9.5px] text-[#30D158] font-normal">(&lt;2% target)</span></span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span>Reply Rate:</span>
+                      <span className="font-mono text-white/80">{replyRate}</span>
                     </div>
                   </div>
 
@@ -462,6 +486,74 @@ export function SettingsView({ onOpenDnc }: SettingsViewProps) {
           </div>
         </div>
       )}
+
+      {/* Team Anti-Spam Protocol & Deliverability Checklist (Visible to Everyone) */}
+      <div className="p-5 sm:p-6 rounded-2xl bg-white/[0.03] border border-white/10 space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-[#5E5CE6] to-[#0A84FF] text-white flex items-center justify-center shadow-sm ring-1 ring-white/20">
+              <Shield className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="text-sm font-bold text-white/95">Team Anti-Spam Protocol & Deliverability Checklist</h2>
+              <p className="text-xs text-white/50">
+                Core guidelines for personal @gmail.com outreach. These rules ensure authentic engagement and protect sender reputation.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+          <div className="p-3.5 rounded-xl bg-white/[0.02] border border-white/5 space-y-1">
+            <div className="flex items-center gap-2 text-xs font-semibold text-white/90">
+              <Check className="w-3.5 h-3.5 text-[#30D158]" />
+              <span>Real Name & Profile Photo</span>
+            </div>
+            <p className="text-[11px] text-white/50 leading-relaxed pl-5">
+              Ensure your Google Account has your real first and last name plus a clear profile photo. Gmail spam algorithms penalize anonymous or default placeholder profiles.
+            </p>
+          </div>
+
+          <div className="p-3.5 rounded-xl bg-white/[0.02] border border-white/5 space-y-1">
+            <div className="flex items-center gap-2 text-xs font-semibold text-white/90">
+              <Check className="w-3.5 h-3.5 text-[#30D158]" />
+              <span>Short, Personal Emails (20-200 Words)</span>
+            </div>
+            <p className="text-[11px] text-white/50 leading-relaxed pl-5">
+              Keep cold messages between 20 and 200 words. Reference specific prospect details (company, role). The CRM composer automatically warns on lengthy or sparse pitches.
+            </p>
+          </div>
+
+          <div className="p-3.5 rounded-xl bg-white/[0.02] border border-white/5 space-y-1">
+            <div className="flex items-center gap-2 text-xs font-semibold text-white/90">
+              <Check className="w-3.5 h-3.5 text-[#30D158]" />
+              <span>No Mass Copy-Pasting (&gt;85% Similarity Guard)</span>
+            </div>
+            <p className="text-[11px] text-white/50 leading-relaxed pl-5">
+              Never blast the same pitch repeatedly. The CRM blocks identical messages (&gt;85% token overlap with any send in the last 14 days) to prevent Google fingerprinting.
+            </p>
+          </div>
+
+          <div className="p-3.5 rounded-xl bg-white/[0.02] border border-white/5 space-y-1">
+            <div className="flex items-center gap-2 text-xs font-semibold text-white/90">
+              <Check className="w-3.5 h-3.5 text-[#30D158]" />
+              <span>Stop Immediately After a "No"</span>
+            </div>
+            <p className="text-[11px] text-white/50 leading-relaxed pl-5">
+              Never send follow-ups after any negative response, bounce, or unsubscribe request. The CRM auto-halts follow-ups and adds opt-outs to the universal Do Not Contact list.
+            </p>
+          </div>
+        </div>
+
+        {/* Disclaimer */}
+        <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-200/90 flex items-start gap-2.5">
+          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+          <div className="text-[11px] text-amber-200/80 leading-relaxed">
+            <strong className="text-amber-300 font-semibold">Honest Disclosure: </strong>
+            No software can guarantee 100% inbox placement. These automated protections, warm-up schedules, and pacing controls minimize spam filter triggers when sending from personal @gmail.com accounts.
+          </div>
+        </div>
+      </div>
 
       {/* SECTION 3: Storage Gauge (500 MB Postgres Free Tier Guard) */}
       <div className="p-5 sm:p-6 rounded-2xl bg-white/[0.03] border border-white/10 space-y-4">

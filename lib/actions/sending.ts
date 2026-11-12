@@ -4,6 +4,13 @@ import { createClient as createServerClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { normalizeEmail } from '@/lib/prospect-normalization';
 import { sendGmailMessageViaApi } from '@/lib/gmail';
+import { 
+  detectDomainTypo, 
+  isRoleAddress, 
+  findUnresolvedVariables, 
+  calculateSpamRisk, 
+  calculateTextSimilarity 
+} from '@/lib/deliverability';
 
 export interface SendMessageParams {
   accountId: string;
@@ -101,6 +108,112 @@ export async function sendOutreachOrReplyAction(
 
   const cleanRecipientEmail = params.toEmail.trim().toLowerCase();
   const recipientDomain = cleanRecipientEmail.split('@')[1] || '';
+  const isReply = !!params.isReply;
+
+  // 2b. Domain Typo & Role Address Protection
+  const typoSuggestion = detectDomainTypo(cleanRecipientEmail);
+  if (typoSuggestion) {
+    return {
+      success: false,
+      error: `Recipient address domain looks like a typo ("${recipientDomain}"). Did you mean ${cleanRecipientEmail.split('@')[0]}@${typoSuggestion}?`,
+    };
+  }
+
+  if (!isReply && isRoleAddress(cleanRecipientEmail) && !params.adminOverride) {
+    return {
+      success: false,
+      error: `Role-based address (${cleanRecipientEmail}) detected. Cold outreach to role inboxes triggers spam filters. Admin override required.`,
+    };
+  }
+
+  // 2c. Unresolved Template Variables (Hard Block)
+  const unresolvedVars = [
+    ...findUnresolvedVariables(params.subject),
+    ...findUnresolvedVariables(params.body)
+  ];
+  if (unresolvedVars.length > 0) {
+    return {
+      success: false,
+      error: `Cannot send: message contains unresolved template variables (${unresolvedVars.join(', ')}). Please personalize all fields.`,
+    };
+  }
+
+  // 2d. Content Spam Risk Analysis (Block at High Risk)
+  const spamRisk = calculateSpamRisk({
+    subject: params.subject,
+    body: params.body,
+    hasAttachments: false,
+    isFirstEmail: !isReply,
+  });
+
+  if (spamRisk.level === 'high' && !params.adminOverride) {
+    return {
+      success: false,
+      error: `High spam risk (${spamRisk.score}/100): ${spamRisk.reasons.join('; ')}. Please adjust content before sending.`,
+    };
+  }
+
+  // 2e. Pacing & Burst Prevention (Max 3 sends in 10 minutes per mailbox)
+  const tenMinsAgoIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  const { data: recentSends } = await adminClient
+    .from('audit_log')
+    .select('id')
+    .eq('action', 'email.sent_outreach')
+    .gte('created_at', tenMinsAgoIso)
+    .contains('metadata', { accountId: account.id });
+
+  if (recentSends && recentSends.length >= 3 && !params.adminOverride) {
+    return {
+      success: false,
+      error: 'Burst limit reached: maximum 3 outreach emails per 10 minutes from this mailbox. Please wait a few minutes to protect your Gmail reputation.',
+    };
+  }
+
+  // 2f. Frequency Guard (Never email same person twice within 3 days unless replying)
+  if (!isReply) {
+    const threeDaysAgoIso = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: recentContactEmail } = await adminClient
+      .from('messages')
+      .select('id, sent_at')
+      .eq('to_email', cleanRecipientEmail)
+      .eq('direction', 'outbound')
+      .gte('sent_at', threeDaysAgoIso)
+      .limit(1)
+      .maybeSingle();
+
+    if (recentContactEmail && !params.adminOverride) {
+      return {
+        success: false,
+        error: `Frequency protection: ${cleanRecipientEmail} was already emailed within the last 3 days. Space follow-ups by at least 72 hours.`,
+      };
+    }
+  }
+
+  // 2g. Template Body Similarity Check (>85% similar to team outreach in past 14 days)
+  if (!isReply) {
+    const fourteenDaysAgoIso = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: pastMessages } = await adminClient
+      .from('messages')
+      .select('body_text')
+      .eq('direction', 'outbound')
+      .gte('sent_at', fourteenDaysAgoIso)
+      .limit(20);
+
+    if (pastMessages && pastMessages.length > 0) {
+      const isTooSimilar = pastMessages.some(m => {
+        if (!m.body_text) return false;
+        const sim = calculateTextSimilarity(params.body, m.body_text);
+        return sim > 0.85;
+      });
+
+      if (isTooSimilar && !params.adminOverride) {
+        return {
+          success: false,
+          error: 'Content similarity warning: This body is over 85% similar to an email sent recently. Free Gmail accounts require personalized outreach to avoid spam filters. Please customize.',
+        };
+      }
+    }
+  }
 
   // 3. Do Not Contact (DNC) Verification
   const { data: dncMatch } = await adminClient
@@ -179,7 +292,6 @@ export async function sendOutreachOrReplyAction(
   }
 
   // 6. Safe Sending Cap Enforcement (PKT Time)
-  const isReply = !!params.isReply;
   const { data: sendValidation, error: sendValError } = await adminClient.rpc('record_account_send', {
     p_account_id: account.id,
     p_user_id: currentMember.id,
@@ -207,6 +319,20 @@ export async function sendOutreachOrReplyAction(
     existingThread = th;
 
     if (existingThread) {
+      // Maximum 3 follow-ups limit per contact thread
+      const { count: outboundCount } = await adminClient
+        .from('messages')
+        .select('id', { count: 'exact', head: true })
+        .eq('thread_id', activeThreadId)
+        .eq('direction', 'outbound');
+
+      if (outboundCount && outboundCount >= 4 && !params.adminOverride) {
+        return {
+          success: false,
+          error: 'Maximum 3 follow-ups limit reached for this thread. Stopping further automated outreach to avoid spam flags.',
+        };
+      }
+
       // Find latest message in thread for In-Reply-To and References
       const { data: lastMsg } = await adminClient
         .from('messages')
@@ -250,14 +376,13 @@ export async function sendOutreachOrReplyAction(
 
   // Create or update Contact
   if (!linkedContactId) {
-    const { data: createdContact } = await adminClient
+    const { data: createdContact, error: contactErr } = await adminClient
       .from('contacts')
       .insert({
         name: (params.toName || cleanRecipientEmail.split('@')[0]).trim(),
         email: cleanRecipientEmail,
         company: (params.company || '').trim(),
-        status: 'Contacted',
-        owner_user_id: currentMember.id,
+        status: 'contacted',
         first_contacted_at: nowIso,
         last_contacted_at: nowIso,
         last_contacted_by_user_id: currentMember.id,
@@ -267,6 +392,9 @@ export async function sendOutreachOrReplyAction(
       .select('id')
       .single();
 
+    if (contactErr) {
+      console.error('Error inserting contact in sendOutreachOrReplyAction:', contactErr.message);
+    }
     if (createdContact?.id) {
       linkedContactId = createdContact.id;
     }
@@ -276,8 +404,7 @@ export async function sendOutreachOrReplyAction(
       .update({
         last_contacted_at: nowIso,
         last_contacted_by_user_id: currentMember.id,
-        owner_user_id: existingContact?.owner_user_id || currentMember.id,
-        status: 'Contacted',
+        status: 'contacted',
         updated_at: nowIso,
       })
       .eq('id', linkedContactId);
@@ -285,47 +412,82 @@ export async function sendOutreachOrReplyAction(
 
   // Create or update Thread
   if (!activeThreadId) {
-    const { data: createdThread } = await adminClient
+    const { data: existingTh } = await adminClient
       .from('threads')
-      .insert({
-        account_id: account.id,
-        gmail_thread_id: sendResult.gmailThreadId,
-        subject: params.subject,
-        snippet: params.body.slice(0, 140),
-        contact_id: linkedContactId,
-        contact_email: cleanRecipientEmail,
-        contact_name: (params.toName || cleanRecipientEmail.split('@')[0]).trim(),
-        contact_company: (params.company || '').trim(),
-        assigned_to_user_id: currentMember.id,
-        status: 'open',
-        unread: false,
-        last_message_at: nowIso,
-        created_at: nowIso,
-        updated_at: nowIso,
-      })
       .select('id')
-      .single();
+      .eq('gmail_thread_id', sendResult.gmailThreadId)
+      .maybeSingle();
 
-    if (createdThread?.id) {
-      activeThreadId = createdThread.id;
+    if (existingTh?.id) {
+      activeThreadId = existingTh.id;
+      await adminClient
+        .from('threads')
+        .update({
+          snippet: params.body.slice(0, 140),
+          last_message_at: nowIso,
+          updated_at: nowIso,
+        })
+        .eq('id', activeThreadId);
+    } else {
+      const { data: createdThread, error: threadErr } = await adminClient
+        .from('threads')
+        .insert({
+          gmail_thread_id: sendResult.gmailThreadId,
+          subject: params.subject,
+          snippet: params.body.slice(0, 140),
+          status: 'open',
+          assigned_to_user_id: currentMember.id,
+          last_message_at: nowIso,
+          created_at: nowIso,
+          updated_at: nowIso,
+        })
+        .select('id')
+        .single();
+
+      if (threadErr) {
+        console.error('Error inserting thread in sendOutreachOrReplyAction:', threadErr.message);
+      }
+      if (createdThread?.id) {
+        activeThreadId = createdThread.id;
+      }
     }
   } else {
     await adminClient
       .from('threads')
       .update({
-        gmail_thread_id: sendResult.gmailThreadId,
         snippet: params.body.slice(0, 140),
         last_message_at: nowIso,
-        unread: false,
         updated_at: nowIso,
       })
       .eq('id', activeThreadId);
   }
 
+  // Link thread to contact via thread_contacts (critical for search_crm & inbox)
+  if (activeThreadId && linkedContactId) {
+    const { error: tcErr } = await adminClient
+      .from('thread_contacts')
+      .upsert(
+        { thread_id: activeThreadId, contact_id: linkedContactId },
+        { onConflict: 'thread_id,contact_id' }
+      );
+    if (tcErr) {
+      console.error('Error linking thread_contacts:', tcErr.message);
+    }
+  }
+
+  // Mark thread as read for current user
+  if (activeThreadId) {
+    await adminClient
+      .from('thread_user_state')
+      .upsert(
+        { thread_id: activeThreadId, user_id: currentMember.id, is_read: true, is_starred: false },
+        { onConflict: 'thread_id,user_id' }
+      );
+  }
+
   // Insert Sent Message
   if (activeThreadId) {
-    await adminClient.from('messages').insert({
-      account_id: account.id,
+    const { error: msgErr } = await adminClient.from('messages').insert({
       thread_id: activeThreadId,
       contact_id: linkedContactId,
       gmail_message_id: sendResult.gmailMessageId,
@@ -337,9 +499,14 @@ export async function sendOutreachOrReplyAction(
       bcc_email: params.bccEmail || null,
       subject: params.subject,
       body_text: params.body,
+      label_ids: ['SENT'],
       sent_at: nowIso,
       sent_by_user_id: currentMember.id,
     });
+
+    if (msgErr) {
+      console.error('Error inserting message in sendOutreachOrReplyAction:', msgErr.message);
+    }
   }
 
   // 10. Update matching Prospect status to 'contacted'

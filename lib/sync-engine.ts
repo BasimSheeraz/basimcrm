@@ -305,13 +305,12 @@ export async function runGmailSync(options: SyncOptions = {}): Promise<SyncResul
               })
               .eq('id', contactId);
           } else {
-            const { data: newContact } = await adminClient
+            const { data: newContact, error: cErr } = await adminClient
               .from('contacts')
               .insert({
                 name: externalName,
                 email: externalEmail,
-                owner_user_id: account.owner_user_id,
-                status: isOutbound ? 'Contacted' : 'Lead',
+                status: isOutbound ? 'contacted' : 'lead',
                 first_contacted_at: sentAt,
                 last_contacted_at: sentAt,
                 last_contacted_by_user_id: account.owner_user_id,
@@ -320,18 +319,20 @@ export async function runGmailSync(options: SyncOptions = {}): Promise<SyncResul
               })
               .select('id')
               .single();
+            if (cErr) {
+              console.error('sync-engine contact insert error:', cErr.message);
+            }
             if (newContact) contactId = newContact.id;
           }
         }
 
-        // Thread Resolution (upsert on account_id, gmail_thread_id)
+        // Thread Resolution (upsert on gmail_thread_id)
         const gmailThreadId = msgFull.threadId || fallbackThreadId || msgId;
         let threadId: string;
 
         const { data: existingThread } = await adminClient
           .from('threads')
           .select('id, snippet, last_message_at')
-          .eq('account_id', account.id)
           .eq('gmail_thread_id', gmailThreadId)
           .maybeSingle();
 
@@ -342,25 +343,18 @@ export async function runGmailSync(options: SyncOptions = {}): Promise<SyncResul
             .update({
               snippet,
               last_message_at: sentAt,
-              unread: !isOutbound,
-              contact_id: contactId || undefined,
               updated_at: new Date().toISOString(),
             })
             .eq('id', threadId);
         } else {
-          const { data: newThread } = await adminClient
+          const { data: newThread, error: thErr } = await adminClient
             .from('threads')
             .insert({
-              account_id: account.id,
               gmail_thread_id: gmailThreadId,
               subject: subjectHeader,
               snippet,
-              contact_id: contactId,
-              contact_email: externalEmail || '',
-              contact_name: externalName,
               assigned_to_user_id: account.owner_user_id,
               status: 'open',
-              unread: !isOutbound,
               last_message_at: sentAt,
               created_at: sentAt,
               updated_at: sentAt,
@@ -368,13 +362,40 @@ export async function runGmailSync(options: SyncOptions = {}): Promise<SyncResul
             .select('id')
             .single();
 
+          if (thErr) {
+            console.error('sync-engine thread insert error:', thErr.message);
+          }
           if (!newThread) continue;
           threadId = newThread.id;
         }
 
+        // Link thread to contact via thread_contacts (critical for search_crm)
+        if (contactId && threadId) {
+          await adminClient
+            .from('thread_contacts')
+            .upsert(
+              { thread_id: threadId, contact_id: contactId },
+              { onConflict: 'thread_id,contact_id' }
+            );
+        }
+
+        // Set thread_user_state (read for outbound, unread for inbound)
+        if (threadId) {
+          await adminClient
+            .from('thread_user_state')
+            .upsert(
+              {
+                thread_id: threadId,
+                user_id: account.owner_user_id,
+                is_read: isOutbound,
+                is_starred: false,
+              },
+              { onConflict: 'thread_id,user_id' }
+            );
+        }
+
         // Insert Message Record
-        await adminClient.from('messages').insert({
-          account_id: account.id,
+        const { error: msgErr } = await adminClient.from('messages').insert({
           thread_id: threadId,
           contact_id: contactId,
           gmail_message_id: msgId,
@@ -388,11 +409,16 @@ export async function runGmailSync(options: SyncOptions = {}): Promise<SyncResul
           subject: subjectHeader,
           body_text: bodyText,
           body_html: sanitizedHtml,
+          label_ids: Array.isArray(msgFull.labelIds) ? msgFull.labelIds : [],
           sent_at: sentAt,
           sent_by_user_id: isOutbound ? account.owner_user_id : null,
           is_bounce: isBounce,
           is_auto_reply: isAutoReply,
         });
+
+        if (msgErr) {
+          console.error('sync-engine message insert error:', msgErr.message);
+        }
 
         insertedCount++;
 

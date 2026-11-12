@@ -3,7 +3,14 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '@/lib/store';
 import { X, Send, AlertTriangle, ShieldAlert, ExternalLink, StickyNote, Sparkles, UserCheck, Globe, Link2 } from 'lucide-react';
-import { lintEmailDeliverability, calculateWarmupDailyCap } from '@/lib/deliverability';
+import { 
+  lintEmailDeliverability, 
+  calculateWarmupDailyCap, 
+  calculateSpamRisk, 
+  detectDomainTypo, 
+  isRoleAddress, 
+  DEFAULT_OPT_OUT_SENTENCE 
+} from '@/lib/deliverability';
 import { interpolateSnippetVariables } from '@/lib/template';
 import { normalizeEmail } from '@/lib/prospect-normalization';
 import { Prospect, GmailAccountStatus } from '@/types';
@@ -39,6 +46,8 @@ export function ComposeModal({ isOpen, onClose, initialTo }: ComposeModalProps) 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [linkedProspect, setLinkedProspect] = useState<Prospect | null>(null);
+  const [includeOptOut, setIncludeOptOut] = useState(true);
+  const [optOutSentence, setOptOutSentence] = useState(DEFAULT_OPT_OUT_SENTENCE);
 
   const userAccount = gmailAccounts.find(a => a.ownerUserId === currentUser.id);
   const hasConnectedGmail = Boolean(userAccount && !userAccount.email.endsWith('@ourteam.io') && userAccount.status !== 'needs_reconnect');
@@ -190,13 +199,23 @@ export function ComposeModal({ isOpen, onClose, initialTo }: ComposeModalProps) 
     senderName: currentUser.name,
   });
 
-  // 3. Deliverability Linter
+  // 3. Deliverability Linter & Spam Risk Analysis
   const linterWarnings = lintEmailDeliverability({
     subject: resolvedSubject,
     body: resolvedBody,
     hasAttachments: false,
     isFirstEmail: !existingContact || (existingContact.tags || []).includes('Outreach Batch 1')
   });
+
+  const spamRisk = calculateSpamRisk({
+    subject: resolvedSubject,
+    body: resolvedBody,
+    hasAttachments: false,
+    isFirstEmail: !existingContact || (existingContact.tags || []).includes('Outreach Batch 1')
+  });
+
+  const domainTypo = detectDomainTypo(cleanRecipientEmail);
+  const isRole = isRoleAddress(cleanRecipientEmail);
 
   const handleEmailChange = (val: string) => {
     setToEmail(val);
@@ -246,13 +265,22 @@ export function ComposeModal({ isOpen, onClose, initialTo }: ComposeModalProps) 
       return;
     }
 
+    if (spamRisk.level === 'high' && !adminOverride) {
+      setErrorMessage(`High spam risk (${spamRisk.score}/100): ${spamRisk.reasons.join('; ')}. Please edit content to reduce spam score.`);
+      return;
+    }
+
+    const finalBody = includeOptOut && optOutSentence.trim()
+      ? `${resolvedBody.trim()}\n\n---\n${optOutSentence.trim()}`
+      : resolvedBody.trim();
+
     setIsSubmitting(true);
     const result = await composeEmail(
       toEmail,
       toName,
       company,
       resolvedSubject,
-      resolvedBody,
+      finalBody,
       adminOverride,
       linkedProspect?.id || initialTo?.prospectId
     );
@@ -406,6 +434,28 @@ export function ComposeModal({ isOpen, onClose, initialTo }: ComposeModalProps) 
               )}
             </div>
 
+            {/* Typo Suggestion Banner */}
+            {domainTypo && (
+              <div className="p-2.5 rounded-xl bg-[#FF9F0A]/15 border border-[#FF9F0A]/30 text-white text-xs flex items-center justify-between gap-3 animate-in fade-in">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-3.5 h-3.5 text-[#FF9F0A] shrink-0" />
+                  <span className="text-[11.5px]">
+                    Possible typo: Did you mean <strong className="text-white">@{domainTypo}</strong>?
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const local = toEmail.split('@')[0];
+                    setToEmail(`${local}@${domainTypo}`);
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-[#FF9F0A]/20 hover:bg-[#FF9F0A]/30 text-[#FF9F0A] font-semibold text-[11px] transition-colors cursor-pointer"
+                >
+                  Fix Typo
+                </button>
+              </div>
+            )}
+
             {/* Name & Company */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
@@ -493,6 +543,73 @@ export function ComposeModal({ isOpen, onClose, initialTo }: ComposeModalProps) 
               )}
             </div>
 
+            {/* Honest Opt-Out Signature Sentence */}
+            <div className="p-3 rounded-xl bg-white/[0.03] border border-white/10 space-y-2">
+              <label className="flex items-center justify-between cursor-pointer">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={includeOptOut}
+                    onChange={(e) => setIncludeOptOut(e.target.checked)}
+                    className="rounded text-[#0A84FF] focus:ring-0"
+                  />
+                  <span className="text-xs font-semibold text-white/80">Include one-line opt-out sentence</span>
+                </div>
+                <span className="text-[10px] text-white/45">Free Gmail protection</span>
+              </label>
+              {includeOptOut && (
+                <input
+                  type="text"
+                  value={optOutSentence}
+                  onChange={(e) => setOptOutSentence(e.target.value)}
+                  className="w-full text-[11px] p-2 rounded-lg border border-white/10 bg-white/[0.04] text-white/80 focus:outline-none focus:border-[#0A84FF]/50 font-sans italic"
+                />
+              )}
+            </div>
+
+            {/* Spam Risk Meter */}
+            <div className="p-3 rounded-xl bg-white/[0.04] border border-white/10 space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-white/50">
+                    Spam Risk Meter
+                  </span>
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider ${
+                    spamRisk.level === 'low'
+                      ? 'bg-[#30D158]/20 text-[#30D158] border border-[#30D158]/30'
+                      : spamRisk.level === 'medium'
+                      ? 'bg-[#FF9F0A]/20 text-[#FF9F0A] border border-[#FF9F0A]/30'
+                      : 'bg-[#FF453A]/20 text-[#FF453A] border border-[#FF453A]/30'
+                  }`}>
+                    {spamRisk.level} ({spamRisk.score}/100)
+                  </span>
+                </div>
+                <span className="text-[10.5px] text-white/40">
+                  {spamRisk.level === 'low' ? 'Good inbox placement' : spamRisk.level === 'medium' ? 'Review warnings' : 'Blocked: High risk'}
+                </span>
+              </div>
+              
+              <div className="w-full h-1.5 rounded-full bg-white/10 overflow-hidden">
+                <div 
+                  className={`h-full transition-all duration-300 ${
+                    spamRisk.level === 'low' ? 'bg-[#30D158]' : spamRisk.level === 'medium' ? 'bg-[#FF9F0A]' : 'bg-[#FF453A]'
+                  }`}
+                  style={{ width: `${Math.max(8, spamRisk.score)}%` }}
+                />
+              </div>
+
+              {spamRisk.reasons.length > 0 && (
+                <div className="text-[11px] text-white/60 space-y-0.5 pt-1">
+                  {spamRisk.reasons.map((r, idx) => (
+                    <div key={idx} className="flex items-start gap-1.5">
+                      <span className="text-white/40">•</span>
+                      <span>{r}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             {/* Footer & Attribution */}
             <div className="pt-3 border-t border-white/[0.08] flex items-center justify-between">
               <div className="flex items-center space-x-2 text-xs text-white/50">
@@ -528,7 +645,7 @@ export function ComposeModal({ isOpen, onClose, initialTo }: ComposeModalProps) 
                 ) : (
                   <button
                     type="submit"
-                    disabled={isSubmitting || isDnc || isCapReached || (isOwnedByOther && !adminOverride)}
+                    disabled={isSubmitting || isDnc || isCapReached || (isOwnedByOther && !adminOverride) || (spamRisk.level === 'high' && !adminOverride)}
                     className="flex items-center space-x-2 apple-primary-btn px-4 py-2 rounded-xl text-xs font-semibold transition-all shadow-sm active:scale-95 disabled:opacity-40 cursor-pointer"
                   >
                     <Send className="w-3.5 h-3.5" strokeWidth={2} />
