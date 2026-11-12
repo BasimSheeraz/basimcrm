@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient as createServerClient } from '@/lib/supabase/server';
+import { createServerClient, type CookieOptions } from '@supabase/ssr';
 import { runGmailSync } from '@/lib/sync-engine';
 
 export const dynamic = 'force-dynamic';
@@ -28,8 +28,27 @@ async function handleSync(req: NextRequest) {
 
   if (!isCronAuthed) {
     try {
-      const serverClient = createServerClient();
-      const { data: { user }, error } = await serverClient.auth.getUser();
+      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+      const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+      if (!supabaseUrl || !supabaseAnonKey) {
+        return NextResponse.json(
+          { error: 'Server configuration error' },
+          { status: 500 }
+        );
+      }
+
+      const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
+        cookies: {
+          get(name: string) {
+            return req.cookies.get(name)?.value;
+          },
+          set() {},
+          remove() {},
+        },
+      });
+
+      const { data: { user }, error } = await supabase.auth.getUser();
       if (error || !user) {
         return NextResponse.json(
           { error: 'Unauthorized: valid CRON_SECRET header (Authorization: Bearer <CRON_SECRET>) or active session required' },
@@ -37,7 +56,7 @@ async function handleSync(req: NextRequest) {
         );
       }
       signedInUserId = user.id;
-    } catch {
+    } catch (err: any) {
       return NextResponse.json(
         { error: 'Unauthorized: valid CRON_SECRET header (Authorization: Bearer <CRON_SECRET>) or active session required' },
         { status: 401 }
@@ -58,9 +77,9 @@ async function handleSync(req: NextRequest) {
       timestamp: new Date().toISOString(),
     });
   } catch (err: any) {
-    console.error('/api/sync fatal error:', err?.message);
+    console.error('/api/sync execution error:', err?.message);
     return NextResponse.json(
-      { success: false, error: err?.message || 'Sync failed' },
+      { success: false, error: err?.message || 'Sync execution failed' },
       { status: 500 }
     );
   }
