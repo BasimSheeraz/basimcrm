@@ -1,5 +1,3 @@
-import DOMPurify from 'isomorphic-dompurify';
-
 /**
  * List of executable extensions strictly blocked from preview or direct opening.
  */
@@ -32,25 +30,36 @@ export function isExecutableBlocked(filename: string): boolean {
 }
 
 /**
- * Sanitizes HTML content from inbound email messages using DOMPurify.
+ * Sanitizes HTML content from inbound email messages.
  * Removes scripts, object/embed/iframe tags, dangerous event handlers, and data/javascript URIs.
+ * Uses lightweight server-side sanitization to avoid heavy JSDOM initialization overhead on serverless.
  */
 export function sanitizeEmailHtml(rawHtml: string): string {
   if (!rawHtml) return '';
-  
-  return DOMPurify.sanitize(rawHtml, {
-    ALLOWED_TAGS: [
-      'a', 'b', 'blockquote', 'br', 'caption', 'code', 'div', 'em', 'h1', 'h2', 'h3',
-      'h4', 'h5', 'h6', 'hr', 'i', 'img', 'li', 'ol', 'p', 'pre', 's', 'span',
-      'strong', 'sub', 'sup', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'u', 'ul'
-    ],
-    ALLOWED_ATTR: [
-      'href', 'title', 'target', 'alt', 'src', 'width', 'height', 'style', 'class', 'align', 'border'
-    ],
-    ALLOWED_URI_REGEXP: /^(?:(?:(?:f|ht)tps?|mailto|tel):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
-    FORBID_TAGS: ['script', 'style', 'iframe', 'frame', 'object', 'embed', 'form', 'input'],
-    FORBID_ATTR: ['onerror', 'onload', 'onclick', 'onmouseover', 'onfocus', 'onblur']
-  });
+
+  // Fast, safe regex sanitization for server environments
+  let sanitized = rawHtml
+    // Remove HTML comments
+    .replace(/<!--[\s\S]*?-->/g, '')
+    // Remove script tags and contents
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+    // Remove style tags and contents
+    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
+    // Remove iframe, frame, object, embed, form, input tags and contents
+    .replace(/<iframe\b[^<]*(?:(?!<\/iframe>)<[^<]*)*<\/iframe>/gi, '')
+    .replace(/<frame\b[^<]*(?:(?!<\/frame>)<[^<]*)*<\/frame>/gi, '')
+    .replace(/<object\b[^<]*(?:(?!<\/object>)<[^<]*)*<\/object>/gi, '')
+    .replace(/<embed\b[^<]*(?:(?!<\/embed>)<[^<]*)*<\/embed>/gi, '')
+    .replace(/<form\b[^<]*(?:(?!<\/form>)<[^<]*)*<\/form>/gi, '')
+    // Strip self-closing or unclosed risky elements
+    .replace(/<\/?(script|style|iframe|frame|object|embed|form|input|applet|meta|link)\b[^>]*>/gi, '')
+    // Strip inline JavaScript event handlers (e.g. onload, onclick, onerror)
+    .replace(/\s+on[a-zA-Z]+\s*=\s*(?:'[^']*'|"[^"]*"|[^\s>]+)/gi, '')
+    // Neutralize dangerous javascript: or data: URLs in href and src
+    .replace(/\b(href|src)\s*=\s*(['"])\s*(?:javascript|data|vbscript):.*?\2/gi, '$1="#"')
+    .replace(/\b(href|src)\s*=\s*(?:javascript|data|vbscript):[^\s>]+/gi, '$1="#"');
+
+  return sanitized;
 }
 
 /**

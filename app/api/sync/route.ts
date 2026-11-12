@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createServerClient, type CookieOptions } from '@supabase/ssr';
-import { runGmailSync } from '@/lib/sync-engine';
+import { createServerClient } from '@supabase/ssr';
 
 export const dynamic = 'force-dynamic';
 
@@ -67,6 +66,7 @@ async function handleSync(req: NextRequest) {
   const requestedAccountId = req.nextUrl.searchParams.get('accountId') || undefined;
 
   try {
+    const { runGmailSync } = await import('@/lib/sync-engine');
     const result = await runGmailSync({
       userId: signedInUserId,
       accountId: requestedAccountId,
